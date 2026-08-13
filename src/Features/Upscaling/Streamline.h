@@ -75,8 +75,6 @@ public:
 	Util::FrameChecker frameChecker;
 	sl::FrameToken* frameToken = nullptr;
 
-	bool isRTXBelow40series = false;
-
 	struct ReflexOptionsCache
 	{
 		bool valid = false;
@@ -104,8 +102,6 @@ public:
 
 	bool EnsureFrameToken();
 	bool CheckFrameConstants(sl::ViewportHandle p_viewport, uint32_t eyeIndex = 0);
-
-	bool IsRTXAndBelow40Series(IDXGIAdapter* a_adapter);
 
 	void SetDLSSOptions(sl::ViewportHandle p_viewport, uint32_t width);
 
