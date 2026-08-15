@@ -1526,7 +1526,6 @@
     "feature.upscaling.preset_performance": "性能",
     "feature.upscaling.preset_quality": "质量",
     "feature.upscaling.preset_ultra_performance": "超级性能",
-    "feature.upscaling.reflex_blocked_by_fg": "当DX12帧生成交换链激活时，Reflex不可用。",
     "feature.upscaling.reflex_not_available": "Reflex不可用。请确保sl.reflex.dll存在并重启。",
     "feature.upscaling.sharpness": "锐度",
     "feature.upscaling.streamline_logging": "Streamline日志记录",

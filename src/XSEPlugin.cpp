@@ -155,6 +155,10 @@ bool Load()
 		stl::report_and_fail("Old version of PrivateProfileRedirector detected, 0.6.2+ required if using it."sv);
 	}
 
+	// Frame generation is flatrim-only; the DRS reset must precede any D3D device.
+	if (!REL::Module::IsVR())
+		Streamline::EnsureDriverProfileAllowsDLSSG();
+
 	auto messaging = SKSE::GetMessagingInterface();
 	messaging->RegisterListener("SKSE", MessageHandler);
 
