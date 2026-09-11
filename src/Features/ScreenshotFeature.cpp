@@ -482,7 +482,13 @@ void ScreenshotFeature::EnsurePreviewCache(ID3D11Texture2D* sourceTexture)
 void ScreenshotFeature::Reset()
 {
 	if (captureRequested.exchange(false)) {
-		Capture();
+		try {
+			Capture();
+		} catch (const std::exception& e) {
+			logger::error("Screenshot capture failed: {}", e.what());
+		} catch (...) {
+			logger::error("Screenshot capture failed with an unknown exception.");
+		}
 	}
 }
 
