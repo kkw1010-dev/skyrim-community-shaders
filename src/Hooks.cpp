@@ -245,8 +245,6 @@ struct IDXGISwapChain_Present
 				return func(swapChain, syncInterval, presentFlags);
 			});
 
-		globals::features::upscaling.dx12SwapChain.ClearWrappedBuffers();
-
 		TracyD3D11Collect(globals::state->tracyCtx);
 
 		return retval;
