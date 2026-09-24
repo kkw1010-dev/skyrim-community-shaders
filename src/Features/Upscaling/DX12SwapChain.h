@@ -63,8 +63,13 @@ class DX12SwapChain
 public:
 	winrt::com_ptr<ID3D12Device> d3d12Device;
 	winrt::com_ptr<ID3D12CommandQueue> commandQueue;
-	winrt::com_ptr<ID3D12CommandAllocator> commandAllocators[3];
-	winrt::com_ptr<ID3D12GraphicsCommandList4> commandLists[3];
+
+	// 4x DLSS-G generates 3 interpolated frames per real frame; the SL pacer needs those
+	// plus 2 slots of its own slack to avoid oversubscribing the flip-model chain.
+	static constexpr UINT kMaxBackBuffers = 5;
+
+	winrt::com_ptr<ID3D12CommandAllocator> commandAllocators[kMaxBackBuffers];
+	winrt::com_ptr<ID3D12GraphicsCommandList4> commandLists[kMaxBackBuffers];
 
 	IDXGISwapChain4* swapChain;
 
@@ -83,12 +88,12 @@ public:
 	winrt::com_ptr<ID3D11Fence> d3d11Fence;
 	winrt::com_ptr<ID3D12Fence> d3d12Fence;
 
-	winrt::com_ptr<ID3D12Resource> swapChainBuffers[3];
+	winrt::com_ptr<ID3D12Resource> swapChainBuffers[kMaxBackBuffers];
 
 	UINT frameIndex = 0;
 	UINT64 fenceValue = 0;
 
-	UINT64 frameFenceValues[3] = { 0, 0, 0 };
+	UINT64 frameFenceValues[kMaxBackBuffers] = {};
 
 	LARGE_INTEGER qpf;
 
@@ -97,6 +102,9 @@ public:
 	DXGISwapChainProxy* swapChainProxy = nullptr;
 
 	bool useDLSSG = false;
+
+	// Actual buffer count the live swap chain was created/resized with (<= kMaxBackBuffers).
+	UINT backBufferCount = 2;
 
 	// Returns the current frame time (in seconds) for accurate FPS calculation when frame generation is active
 	float GetFrameTime() const;
@@ -113,6 +121,7 @@ public:
 	void SetD3D11DeviceContext(ID3D11DeviceContext* a_d3d11Context);
 
 	HRESULT GetBuffer(UINT buffer, REFIID riid, void** ppSurface);
+	/** @brief IDXGISwapChain::ResizeBuffers equivalent; rejects any bufferCount differing from the chain's own backBufferCount. */
 	HRESULT ResizeBuffers(UINT bufferCount, UINT width, UINT height, DXGI_FORMAT format, UINT flags);
 	HRESULT Present(UINT SyncInterval, UINT Flags);
 	HRESULT GetDevice(_In_ REFIID riid, _COM_Outptr_ void** ppDevice);
