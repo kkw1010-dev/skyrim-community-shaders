@@ -791,7 +791,7 @@ void Streamline::UpdateReflex()
 	sl::ReflexOptions options{};
 	if (renderAPI == sl::RenderAPI::eD3D12) {
 		// DX12 Reflex: DLSS-G requires at least eLowLatency when FG is active
-		bool needReflex = upscaling.ShouldUseFrameGenerationThisFrame() || settings.reflexLowLatencyMode;
+		bool needReflex = upscaling.ShouldPrepareFrameGeneration() || settings.reflexLowLatencyMode;
 		if (needReflex)
 			options.mode = settings.reflexLowLatencyBoost ? sl::ReflexMode::eLowLatencyWithBoost : sl::ReflexMode::eLowLatency;
 		else
