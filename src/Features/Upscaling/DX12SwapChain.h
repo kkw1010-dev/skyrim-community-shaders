@@ -8,13 +8,16 @@
 
 #include <d3d11_4.h>
 #include <d3d12.h>
+#include <string>
 
 #include <directx/d3dx12.h>
 
 class WrappedResource
 {
 public:
-	WrappedResource(D3D11_TEXTURE2D_DESC a_texDesc, ID3D11Device5* a_d3d11Device, ID3D12Device* a_d3d12Device);
+	// a_name follows Util::SetResourceName's "Feature::Name" convention; views get " SRV"/
+	// " UAV"/" RTV" suffixes. Pass empty to leave resources unnamed.
+	WrappedResource(D3D11_TEXTURE2D_DESC a_texDesc, ID3D11Device5* a_d3d11Device, ID3D12Device* a_d3d12Device, const std::string& a_name = {});
 	~WrappedResource();
 
 	ID3D11Texture2D* resource11 = nullptr;
@@ -22,6 +25,23 @@ public:
 	ID3D11UnorderedAccessView* uav = nullptr;
 	ID3D11RenderTargetView* rtv = nullptr;
 	winrt::com_ptr<ID3D12Resource> resource;
+};
+
+/** @brief D3D12 fence shared into D3D11; value is the last value handed out by Next(). */
+struct SharedFence
+{
+	static constexpr DWORD kRemovalPollMs = 100;
+	winrt::com_ptr<ID3D12Fence> fence12;
+	winrt::com_ptr<ID3D11Fence> fence11;
+	uint64_t value = 0;
+
+	/** @brief Returns the next value to signal, advancing the monotonic counter. */
+	uint64_t Next() { return ++value; }
+	/** @brief Creates and names the fence; throws on failure without leaking the NT handle. */
+	void Create(ID3D12Device* a_device12, ID3D11Device5* a_device11, const char* a_name);
+	/** @brief Waits on the CPU up to a_timeoutMs, polling device removal via fence12's own device.
+	 *  Trivially true when the fence is unset or a_value is 0 (nothing to wait for). */
+	bool CpuWait(uint64_t a_value, DWORD a_timeoutMs) const;
 };
 
 struct DXGISwapChainProxy : IDXGISwapChain
@@ -85,13 +105,11 @@ public:
 	winrt::com_ptr<ID3D11Device5> d3d11Device;
 	winrt::com_ptr<ID3D11DeviceContext4> d3d11Context;
 
-	winrt::com_ptr<ID3D11Fence> d3d11Fence;
-	winrt::com_ptr<ID3D12Fence> d3d12Fence;
+	SharedFence interopFence;
 
 	winrt::com_ptr<ID3D12Resource> swapChainBuffers[kMaxBackBuffers];
 
 	UINT frameIndex = 0;
-	UINT64 fenceValue = 0;
 
 	UINT64 frameFenceValues[kMaxBackBuffers] = {};
 
