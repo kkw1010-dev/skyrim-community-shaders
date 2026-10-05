@@ -65,9 +65,8 @@ public:
 		uint frameGenerationMode = 1;
 		uint frameGenerationForceEnable = 0;
 		bool frameGenerationAllowInMenus = false;
-		// Workaround for adapters where DLSS-G initializes successfully but silently
-		// produces no interpolated frames; forces the FSR3 FG backend instead.
-		bool preferFSRFrameGen = false;
+		// DLSS-G is opt-in; off keeps AMD FSR frame generation.
+		bool enableDLSSFrameGen = false;
 		// Generated frames per real frame (1=2x). Clamped at apply time to the
 		// hardware-reported DLSSGState::numFramesToGenerateMax.
 		uint dlssgFramesToGenerate = 1;

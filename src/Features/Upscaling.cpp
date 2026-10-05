@@ -28,7 +28,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	frameGenerationMode,
 	frameGenerationForceEnable,
 	frameGenerationAllowInMenus,
-	preferFSRFrameGen,
+	enableDLSSFrameGen,
 	dlssgFramesToGenerate,
 	streamlineLogLevel,
 	sharpnessFSR,
@@ -137,9 +137,7 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 			upscaling.streamlineDX12.CheckFeatures(pAdapter);
 			upscaling.streamlineDX12.PostDevice();
 
-			// Only suppress DLSS-G when FSR3 is actually reachable to fall back to.
-			const bool userPrefersReachableFsr = upscaling.settings.preferFSRFrameGen && upscaling.fidelityFX.featureFSR3FG;
-			dlssgAvailable = upscaling.streamlineDX12.featureDLSSG && !userPrefersReachableFsr;
+			dlssgAvailable = upscaling.streamlineDX12.featureDLSSG && upscaling.settings.enableDLSSFrameGen;
 
 			// Gating on dlssgAvailable (any cause, not just preference) keeps the FSR
 			// path on a clean device -- upgrading unconditionally corrupted FSR3's
@@ -375,12 +373,11 @@ void Upscaling::DrawSettings()
 			}
 
 			if (streamlineDX12.featureDLSSG) {
-				ImGui::Checkbox(T(TKEY("prefer_fsr_frame_gen"), "Prefer AMD FSR Frame Generation"), &settings.preferFSRFrameGen);
+				ImGui::Checkbox(T(TKEY("use_dlssg_frame_gen"), "Use NVIDIA DLSS-G"), &settings.enableDLSSFrameGen);
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("%s", T(TKEY("prefer_fsr_frame_gen_tooltip"),
-										  "Uses AMD FSR3 Frame Generation instead of NVIDIA DLSS-G. This is a workaround for\n"
-										  "cases where DLSS-G initializes successfully but produces no interpolated frames.\n"
-										  "Restart required to apply."));
+					ImGui::Text("%s", T(TKEY("use_dlssg_frame_gen_tooltip"),
+										  "Selects NVIDIA DLSS-G instead of AMD FSR on supported hardware.\n"
+										  "Leave off to use AMD FSR. Restart required to apply."));
 				}
 			}
 
@@ -1792,9 +1789,7 @@ void Upscaling::PostBackendDevice()
 // Module availability methods
 bool Upscaling::HasFrameGenModule() const
 {
-	// Only suppress DLSS-G when FSR3 is actually reachable to fall back to.
-	const bool userPrefersReachableFsr = settings.preferFSRFrameGen && fidelityFX.featureFSR3FG;
-	return fidelityFX.featureFSR3FG || (streamlineDX12.featureDLSSG && !userPrefersReachableFsr);
+	return fidelityFX.featureFSR3FG || (streamlineDX12.featureDLSSG && settings.enableDLSSFrameGen);
 }
 
 Upscaling::FrameGenMethod Upscaling::GetFrameGenMethod() const

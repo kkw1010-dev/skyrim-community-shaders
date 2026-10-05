@@ -1614,6 +1614,8 @@
     "feature.upscaling.streamline_logging_tooltip": "Streamline logging controls the verbosity of NVIDIA Streamline backend logs. Useful for debugging issues with DLSS/DLSS-G.",
     "feature.upscaling.upscale_preset": "Upscale Preset",
     "feature.upscaling.upscaling_intermediates": "Upscaling Intermediates",
+    "feature.upscaling.use_dlssg_frame_gen": "Use NVIDIA DLSS-G",
+    "feature.upscaling.use_dlssg_frame_gen_tooltip": "Selects NVIDIA DLSS-G instead of AMD FSR on supported hardware.\nLeave off to use AMD FSR. Restart required to apply.",
     "feature.upscaling.use_fps_limit": "Use FPS Limit",
     "feature.upscaling.use_fps_limit_tooltip_1": "Uses Reflex's internal FPS cap for steadier frametimes.",
     "feature.upscaling.use_fps_limit_tooltip_2": "Can lower latency versus uncapped rendering.",
