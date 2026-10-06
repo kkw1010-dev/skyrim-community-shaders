@@ -1,8 +1,10 @@
 #include "DX12SwapChain.h"
 
+#include <DirectXTex.h>
 #include <FidelityFX/api/include/dx12/ffx_api_dx12.hpp>
 #include <algorithm>
 #include <dxgi1_6.h>
+#include <wincodec.h>
 
 #include "../HDRDisplay.h"
 #include "../Upscaling.h"
@@ -497,7 +499,48 @@ bool DX12SwapChain::ComposeDLSSGFrame()
 	d3d11Context->CSSetShader(nullptr, nullptr, 0);
 
 	d3d11Context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, reinterpret_cast<ID3D11RenderTargetView* const*>(savedRTVs), savedDSV.get());
+
+	static constexpr uint32_t kDumpAtComposedFrame = 600;
+	if (++dlssgComposedFrames == kDumpAtComposedFrame)
+		DumpDLSSGInputs();
 	return true;
+}
+
+void DX12SwapChain::DumpDLSSGInputs()
+{
+	const auto directory = logger::log_directory();
+	if (!directory)
+		return;
+
+	struct DumpTarget
+	{
+		WrappedResource* resource;
+		const wchar_t* fileName;
+		bool keepAlpha;
+	};
+	const DumpTarget targets[] = {
+		{ hudlessBufferWrapped, L"CommunityShaders-DLSSG-HUDless.png", false },
+		{ uiBufferWrapped, L"CommunityShaders-DLSSG-UI.png", true },
+		{ swapChainBufferWrapped, L"CommunityShaders-DLSSG-Final.png", false },
+	};
+	for (const auto& target : targets) {
+		const auto path = *directory / target.fileName;
+		DirectX::ScratchImage captured;
+		DirectX::ScratchImage converted;
+		HRESULT result = DirectX::CaptureTexture(d3d11Device.get(), d3d11Context.get(), target.resource->resource11, captured);
+		const DirectX::Image* image = SUCCEEDED(result) ? captured.GetImage(0, 0, 0) : nullptr;
+		if (image && image->format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+			result = DirectX::Convert(*image, DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, converted);
+			image = SUCCEEDED(result) ? converted.GetImage(0, 0, 0) : nullptr;
+		}
+		if (image)
+			result = DirectX::SaveToWICFile(*image, DirectX::WIC_FLAGS_NONE, DirectX::GetWICCodec(DirectX::WIC_CODEC_PNG), path.c_str(),
+				target.keepAlpha ? nullptr : &GUID_WICPixelFormat24bppBGR);
+		if (FAILED(result))
+			logger::warn("[DX12SwapChain] Failed to write DLSS-G input {}: HRESULT 0x{:08X}", path.string(), static_cast<uint32_t>(result));
+		else
+			logger::info("[DX12SwapChain] Wrote DLSS-G input {}", path.string());
+	}
 }
 
 HRESULT DX12SwapChain::GetDevice(REFIID uuid, void** ppDevice)

@@ -154,6 +154,9 @@ public:
 	bool ComposeDLSSGFrame();
 	/** @brief True when ComposeDLSSGFrame can run (buffers exist and its shader compiled). */
 	bool CanComposeDLSSGFrame();
+	/** @brief Writes the HUD-less, UI and final DLSS-G inputs as PNGs next to the plugin log. */
+	void DumpDLSSGInputs();
+	uint32_t dlssgComposedFrames = 0;
 	HRESULT GetDevice(_In_ REFIID riid, _COM_Outptr_ void** ppDevice);
 	HANDLE GetFrameLatencyWaitableObject();
 
