@@ -12,6 +12,8 @@
 
 #include <directx/d3dx12.h>
 
+#include "Utils/LazyShader.h"
+
 class WrappedResource
 {
 public:
@@ -97,6 +99,9 @@ public:
 
 	WrappedResource* swapChainBufferWrapped;
 	WrappedResource* uiBufferWrapped;
+	// DLSS-G only: the scene before UI composition, tagged as HUDLessColor.
+	WrappedResource* hudlessBufferWrapped = nullptr;
+	Util::LazyShader<ID3D11ComputeShader> composeUICS;
 
 	// D3D12 interop resources for frame generation
 	WrappedResource* depthBufferShared12 = nullptr;
@@ -142,6 +147,13 @@ public:
 	/** @brief IDXGISwapChain::ResizeBuffers equivalent; rejects any bufferCount differing from the chain's own backBufferCount. */
 	HRESULT ResizeBuffers(UINT bufferCount, UINT width, UINT height, DXGI_FORMAT format, UINT flags);
 	HRESULT Present(UINT SyncInterval, UINT Flags);
+	/**
+	 * @brief DLSS-G: keeps the UI-less scene in hudlessBufferWrapped and composites the UI
+	 * buffer over the back buffer (premultiplied alpha). Returns false if it could not run.
+	 */
+	bool ComposeDLSSGFrame();
+	/** @brief True when ComposeDLSSGFrame can run (buffers exist and its shader compiled). */
+	bool CanComposeDLSSGFrame();
 	HRESULT GetDevice(_In_ REFIID riid, _COM_Outptr_ void** ppDevice);
 	HANDLE GetFrameLatencyWaitableObject();
 

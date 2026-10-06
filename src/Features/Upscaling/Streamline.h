@@ -43,9 +43,14 @@ public:
 	bool featureDLSS = false;
 	bool featureDLSSG = false;
 	bool dlssgResourcesRetained = false;
-	// Upper bound for DLSSGOptions::numFramesToGenerate, queried once via slDLSSGGetState
-	// after PostDevice binds the DLSS-G functions (DX12 instance only). 1 = 2x-only.
+	// Upper bound for DLSSGOptions::numFramesToGenerate (DX12 instance only). 1 = 2x-only.
+	// A query before the swap chain exists can under-report it, so it is re-read later.
 	uint32_t dlssgMaxFramesToGenerate = 1;
+	bool dlssgMaxQueriedAfterPresent = false;
+	bool dlssgLoggedEnabled = false;
+	uint32_t dlssgLoggedFramesToGenerate = 0;
+	uint32_t dlssgLoggedMaxFramesToGenerate = 0;
+	bool dlssgLoggedUIRecomposition = false;
 	// Last slDLSSGGetState results, cached for GetDiagnostics (querying there would
 	// steal the since-last-query frame counter from the present path).
 	sl::DLSSGStatus lastDLSSGStatus = sl::DLSSGStatus::eOk;
@@ -145,8 +150,13 @@ public:
 	void BindReflexAndPCL();
 
 	// DLSS-G frame generation methods (DX12 instance only)
-	/** @brief Configures DLSS-G and retains its resources across temporary pauses. */
-	void ConfigureDLSSG(bool enabled);
+	/**
+	 * @brief Configures DLSS-G and retains its resources across temporary pauses.
+	 * @param uiRecomposition Hudless and UI color/alpha were both tagged this frame.
+	 */
+	void ConfigureDLSSG(bool enabled, bool uiRecomposition);
+	/** @brief Re-reads DLSSGState::numFramesToGenerateMax, logging when it changes. */
+	void RefreshDLSSGMaxFrames(const char* a_when);
 	/**
 	 * @brief Emits a PCL latency marker for the current frame token. The marker's frame
 	 * index is how DLSS-G's pacer matches presents to constants -- structural for FG.

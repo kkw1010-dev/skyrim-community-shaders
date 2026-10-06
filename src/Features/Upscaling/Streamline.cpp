@@ -850,7 +850,24 @@ void Streamline::EmitPCLMarker(sl::PCLMarker a_marker)
 	}
 }
 
-void Streamline::ConfigureDLSSG(bool enabled)
+void Streamline::RefreshDLSSGMaxFrames(const char* a_when)
+{
+	if (!initialized || !slDLSSGGetState)
+		return;
+
+	sl::DLSSGState state{};
+	if (SL_FAILED(result, slDLSSGGetState(viewport, state, nullptr))) {
+		logger::warn("[Streamline DX12] slDLSSGGetState failed querying numFramesToGenerateMax ({}): {}", a_when, magic_enum::enum_name(result));
+		return;
+	}
+
+	const uint32_t maxFramesToGenerate = std::max<uint32_t>(1, state.numFramesToGenerateMax);
+	if (maxFramesToGenerate != dlssgMaxFramesToGenerate)
+		logger::info("[Streamline DX12] DLSS-G supports up to {}x frame generation ({}, was {}x)", maxFramesToGenerate + 1, a_when, dlssgMaxFramesToGenerate + 1);
+	dlssgMaxFramesToGenerate = maxFramesToGenerate;
+}
+
+void Streamline::ConfigureDLSSG(bool enabled, bool uiRecomposition)
 {
 	if (!initialized || !slDLSSGSetOptions)
 		return;
@@ -860,6 +877,8 @@ void Streamline::ConfigureDLSSG(bool enabled)
 	options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
 	options.numFramesToGenerate = std::clamp<uint32_t>(
 		globals::features::upscaling.settings.dlssgFramesToGenerate, 1, dlssgMaxFramesToGenerate);
+	options.numBackBuffers = globals::features::upscaling.dx12SwapChain.backBufferCount;
+	options.enableUserInterfaceRecomposition = uiRecomposition ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 
 	if (SL_FAILED(result, slDLSSGSetOptions(viewport, options))) {
 		static bool errorLogged = false;
@@ -868,6 +887,20 @@ void Streamline::ConfigureDLSSG(bool enabled)
 			logger::error("[Streamline DX12] slDLSSGSetOptions failed: {}", magic_enum::enum_name(result));
 		}
 		return;
+	}
+
+	const uint32_t framesToGenerate = enabled ? options.numFramesToGenerate : 0;
+	if (enabled != dlssgLoggedEnabled || framesToGenerate != dlssgLoggedFramesToGenerate ||
+		dlssgMaxFramesToGenerate != dlssgLoggedMaxFramesToGenerate || (enabled && uiRecomposition != dlssgLoggedUIRecomposition)) {
+		if (enabled)
+			logger::info("[Streamline DX12] DLSS-G on, multiplier {}x of max {}x (UI recomposition {})",
+				framesToGenerate + 1, dlssgMaxFramesToGenerate + 1, uiRecomposition ? "on" : "off");
+		else
+			logger::info("[Streamline DX12] DLSS-G off");
+		dlssgLoggedEnabled = enabled;
+		dlssgLoggedFramesToGenerate = framesToGenerate;
+		dlssgLoggedMaxFramesToGenerate = dlssgMaxFramesToGenerate;
+		dlssgLoggedUIRecomposition = uiRecomposition;
 	}
 
 	if (enabled) {

@@ -833,9 +833,9 @@ void HDRDisplay::RestoreFramebuffer()
 bool HDRDisplay::IsFGCompositingThisFrame() const
 {
 	auto& upscaling = globals::features::upscaling;
-	// DLSS-G's direct swap chain has no post-interpolation UI recomposite (FSR's wrapper
-	// does), so its real frames must keep the HUD baked in.
-	return upscaling.ShouldUseFrameGenerationThisFrame() && !upscaling.UsesDLSSGFrameGen();
+	// DLSS-G gets the UI only through DX12SwapChain's compose pass; without it the UI stays baked in.
+	return upscaling.ShouldUseFrameGenerationThisFrame() &&
+	       (!upscaling.UsesDLSSGFrameGen() || upscaling.dx12SwapChain.CanComposeDLSSGFrame());
 }
 
 HDRDisplay::D3D12UIBufferMode HDRDisplay::GetD3D12UIBufferMode()

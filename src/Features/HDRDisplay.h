@@ -89,6 +89,8 @@ public:
 	// Scale UI brightness in uiBufferWrapped for Frame Gen.
 	void ScaleUIBrightnessForFG();
 	bool ShouldUseD3D12UIBuffer();
+	/** @brief True when frame generation composites the UI buffer this frame (FFX, or CS for DLSS-G). */
+	bool IsFGCompositingThisFrame() const;
 
 	void ApplyHDR();
 
@@ -193,7 +195,4 @@ private:
 	};
 
 	D3D12UIBufferMode GetD3D12UIBufferMode();
-
-	// True when FFX frame generation is actively compositing UI this frame.
-	bool IsFGCompositingThisFrame() const;
 };

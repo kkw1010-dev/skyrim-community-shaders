@@ -173,6 +173,16 @@ void DX12SwapChain::CreateSwapChainDirect(IDXGIAdapter* adapter, DXGI_SWAP_CHAIN
 
 	DX::ThrowIfFailed(swapChain1->QueryInterface(IID_PPV_ARGS(&swapChain)));
 
+	// The pre-swap-chain query can under-report MFG; resize before any buffer is referenced.
+	streamlineDX12.RefreshDLSSGMaxFrames("swap chain created");
+	const UINT requiredBufferCount = std::clamp<UINT>(streamlineDX12.dlssgMaxFramesToGenerate + 2, 3, kMaxBackBuffers);
+	if (requiredBufferCount != backBufferCount) {
+		DX::ThrowIfFailed(swapChain->ResizeBuffers(requiredBufferCount, swapChainDesc.Width, swapChainDesc.Height, swapChainDesc.Format, swapChainDesc.Flags));
+		logger::info("[DX12SwapChain] Direct swap chain resized from {} to {} buffers", backBufferCount, requiredBufferCount);
+		backBufferCount = requiredBufferCount;
+		swapChainDesc.BufferCount = requiredBufferCount;
+	}
+
 	for (UINT i = 0; i < backBufferCount; i++) {
 		DX::ThrowIfFailed(swapChain->GetBuffer(i, IID_PPV_ARGS(&swapChainBuffers[i])));
 		const std::wstring bufferName = L"DX12SwapChain::DirectBackBuffer[" + std::to_wstring(i) + L"]";
@@ -214,14 +224,20 @@ void DX12SwapChain::RecreateWrappedResources(const DXGI_SWAP_CHAIN_DESC1& desc)
 	// allocation cannot leave the proxy with only half of its interop textures.
 	auto newSwapChainBuffer = std::make_unique<WrappedResource>(texDesc11, d3d11Device.get(), d3d12Device.get());
 
+	std::unique_ptr<WrappedResource> newHudlessBuffer;
+	if (useDLSSG)
+		newHudlessBuffer = std::make_unique<WrappedResource>(texDesc11, d3d11Device.get(), d3d12Device.get(), "DX12SwapChain::HUDlessBuffer");
+
 	// UI buffer uses R8G8B8A8_UNORM - vanilla UI is SDR and 8-bit precision
 	texDesc11.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	auto newUiBuffer = std::make_unique<WrappedResource>(texDesc11, d3d11Device.get(), d3d12Device.get());
 
 	delete swapChainBufferWrapped;
 	delete uiBufferWrapped;
+	delete hudlessBufferWrapped;
 	swapChainBufferWrapped = newSwapChainBuffer.release();
 	uiBufferWrapped = newUiBuffer.release();
+	hudlessBufferWrapped = newHudlessBuffer.release();
 
 	globals::features::upscaling.frameGenerationPrepared = false;
 
@@ -333,6 +349,8 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 
 	bool isHDR = hdr && hdr->settings.enableHDR;
 
+	const bool dlssgUIComposed = useDLSSG && globals::features::hdrDisplay.IsFGCompositingThisFrame() && ComposeDLSSGFrame();
+
 	// Wait for D3D11 to finish (includes ApplyHDR scene encoding AND UIBrightnessCS)
 	const uint64_t d3d11SignalValue = interopFence.Next();
 	DX::ThrowIfFailed(d3d11Context->Signal(interopFence.fence11.get(), d3d11SignalValue));
@@ -383,12 +401,14 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 			streamlineDX12.TagDX12Resources(commandLists[frameIndex].get(),
 				depthBufferShared12 ? depthBufferShared12->resource.get() : nullptr,
 				motionVectorBufferShared12 ? motionVectorBufferShared12->resource.get() : nullptr,
-				swapChainBufferWrapped ? swapChainBufferWrapped->resource.get() : nullptr,
-				uiBufferWrapped ? uiBufferWrapped->resource.get() : nullptr,
+				dlssgUIComposed        ? hudlessBufferWrapped->resource.get() :
+				swapChainBufferWrapped ? swapChainBufferWrapped->resource.get() :
+										 nullptr,
+				dlssgUIComposed ? uiBufferWrapped->resource.get() : nullptr,
 				swapChainDesc.Width, swapChainDesc.Height);
-			streamlineDX12.ConfigureDLSSG(upscaling.ShouldUseFrameGenerationThisFrame());
+			streamlineDX12.ConfigureDLSSG(upscaling.ShouldUseFrameGenerationThisFrame(), dlssgUIComposed);
 		} else {
-			streamlineDX12.ConfigureDLSSG(false);
+			streamlineDX12.ConfigureDLSSG(false, false);
 		}
 	} else {
 		upscaling.fidelityFX.Present(upscaling.ShouldUseFrameGenerationThisFrame(), isHDR);
@@ -407,8 +427,17 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 	// Present the frame
 	DX::ThrowIfFailed(swapChain->Present(SyncInterval, Flags));
 
-	if (useDLSSG)
-		upscaling.streamlineDX12.EmitPCLMarker(sl::PCLMarker::ePresentEnd);
+	if (useDLSSG) {
+		auto& streamlineDX12 = upscaling.streamlineDX12;
+		streamlineDX12.EmitPCLMarker(sl::PCLMarker::ePresentEnd);
+		if (!streamlineDX12.dlssgMaxQueriedAfterPresent) {
+			streamlineDX12.dlssgMaxQueriedAfterPresent = true;
+			streamlineDX12.RefreshDLSSGMaxFrames("first present");
+			const UINT requiredBufferCount = std::clamp<UINT>(streamlineDX12.dlssgMaxFramesToGenerate + 2, 3, kMaxBackBuffers);
+			if (requiredBufferCount > backBufferCount)
+				logger::warn("[DX12SwapChain] {} back buffers is below the {} that {}x DLSS-G needs; restart the game", backBufferCount, requiredBufferCount, streamlineDX12.dlssgMaxFramesToGenerate + 1);
+		}
+	}
 
 	// Wait for D3D12 to finish
 	const uint64_t d3d12SignalValue = interopFence.Next();
@@ -432,6 +461,43 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 	upscaling.frameGenerationPrepared = false;
 
 	return S_OK;
+}
+
+bool DX12SwapChain::CanComposeDLSSGFrame()
+{
+	return hudlessBufferWrapped && swapChainBufferWrapped && uiBufferWrapped && swapChainBufferWrapped->uav &&
+	       composeUICS.Get(L"Data/Shaders/Upscaling/ComposeUICS.hlsl", {}, "cs_5_0", "main", "DX12SwapChain::ComposeUICS");
+}
+
+bool DX12SwapChain::ComposeDLSSGFrame()
+{
+	if (!CanComposeDLSSGFrame())
+		return false;
+	auto* computeShader = composeUICS.get();
+
+	TracyD3D11Zone(globals::state->tracyCtx, "Upscaling - DLSS-G Compose UI");
+
+	winrt::com_ptr<ID3D11RenderTargetView> savedRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+	winrt::com_ptr<ID3D11DepthStencilView> savedDSV;
+	d3d11Context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, reinterpret_cast<ID3D11RenderTargetView**>(savedRTVs), savedDSV.put());
+	d3d11Context->OMSetRenderTargets(0, nullptr, nullptr);
+
+	d3d11Context->CopyResource(hudlessBufferWrapped->resource11, swapChainBufferWrapped->resource11);
+
+	ID3D11ShaderResourceView* srvs[2] = { hudlessBufferWrapped->srv, uiBufferWrapped->srv };
+	d3d11Context->CSSetShaderResources(0, 2, srvs);
+	d3d11Context->CSSetUnorderedAccessViews(0, 1, &swapChainBufferWrapped->uav, nullptr);
+	d3d11Context->CSSetShader(computeShader, nullptr, 0);
+	d3d11Context->Dispatch((swapChainDesc.Width + 7) / 8, (swapChainDesc.Height + 7) / 8, 1);
+
+	ID3D11ShaderResourceView* nullSRVs[2] = {};
+	ID3D11UnorderedAccessView* nullUAV = nullptr;
+	d3d11Context->CSSetShaderResources(0, 2, nullSRVs);
+	d3d11Context->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
+	d3d11Context->CSSetShader(nullptr, nullptr, 0);
+
+	d3d11Context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, reinterpret_cast<ID3D11RenderTargetView* const*>(savedRTVs), savedDSV.get());
+	return true;
 }
 
 HRESULT DX12SwapChain::GetDevice(REFIID uuid, void** ppDevice)

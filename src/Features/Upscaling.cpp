@@ -1482,6 +1482,7 @@ void Upscaling::ClearShaderCache()
 	depthRefractionUpscalePS = nullptr;  // com_ptr automatically releases
 	underwaterMaskUpscalePS = nullptr;   // com_ptr automatically releases
 	upscaleVS = nullptr;                 // com_ptr automatically releases
+	dx12SwapChain.composeUICS.Reset();
 }
 
 bool Upscaling::CopySharedD3D12Resources()
@@ -1812,7 +1813,7 @@ uint Upscaling::GetFrameGenerationMultiplier() const
 		return 2;
 	// Clamp to the hardware max like Streamline::ConfigureDLSSG does, or a stale
 	// settings value would desync FrameLimiter's pacing from the real multiplier.
-	const uint32_t clamped = std::clamp<uint32_t>(settings.dlssgFramesToGenerate, 0, streamlineDX12.dlssgMaxFramesToGenerate);
+	const uint32_t clamped = std::clamp<uint32_t>(settings.dlssgFramesToGenerate, 1, streamlineDX12.dlssgMaxFramesToGenerate);
 	return clamped + 1;
 }
 
