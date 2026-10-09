@@ -1741,6 +1741,8 @@ namespace Util
 				return VK_NUMPAD9;
 			case DIK_DECIMAL:
 				return VK_DECIMAL;
+			case DIK_DIVIDE:
+				return VK_DIVIDE;  // extended scan code: MapVirtualKeyEx cannot resolve it
 			case DIK_NUMPADENTER:
 				return IM_VK_KEYPAD_ENTER;
 			case DIK_RMENU:
