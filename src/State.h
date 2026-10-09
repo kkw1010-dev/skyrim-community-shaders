@@ -212,6 +212,8 @@ public:
 	}
 
 	void UpdateSharedData(bool a_inWorld, bool a_prepass);
+	/** @brief Binds SharedData (b5) and, optionally, FeatureData (b6) for a compute pass. */
+	void BindSharedDataCS(ID3D11DeviceContext* a_context, bool a_withFeatureData = true) const;
 	void UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass);
 	bool HasDirectionalShadows() const;
 
@@ -263,6 +265,9 @@ public:
 
 	ConstantBuffer* sharedDataCB = nullptr;
 	ConstantBuffer* featureDataCB = nullptr;
+
+	// Set by Deferred's Main_RenderWorld hook, cleared at the start of every Present.
+	bool worldRenderedThisFrame = false;
 
 	PermutationCB permutationData{};
 	PermutationCB permutationDataPrevious{};

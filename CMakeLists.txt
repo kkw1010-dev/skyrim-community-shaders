@@ -120,6 +120,7 @@ target_include_directories(
         ${BSHOSHANY_THREAD_POOL_INCLUDE_DIRS}
         ${CLIB_UTIL_INCLUDE_DIRS}
         "${CMAKE_SOURCE_DIR}/package/Shaders"
+        "${CMAKE_SOURCE_DIR}/extern/Streamline-DX12/external/ngx-sdk/include"  # NGX defines for Neural Rendering
         ${DETOURS_INCLUDE_DIRS}
 )
 
@@ -140,6 +141,7 @@ target_link_libraries(
         Tracy::TracyClient
         Streamline
         d3d12.lib
+        bcrypt.lib  # SHA-256 of the Neural Rendering runtime (Utils/FileDigest)
         Microsoft::DirectX-Headers
         ${DETOURS_LIBRARY}
 )

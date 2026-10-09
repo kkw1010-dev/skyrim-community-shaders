@@ -37,6 +37,9 @@ namespace Util
 		 */
 		std::filesystem::path GetCommunityShaderPath();
 
+		/** @brief std::filesystem::absolute that logs and returns the input instead of throwing. */
+		std::filesystem::path SafeAbsolute(const std::filesystem::path& path);
+
 		/**
 		 * Gets the CommunityShaders_ImGui.ini file path
 		 * @return Data / "SKSE" / "Plugins" / "CommunityShaders_ImGui.ini"

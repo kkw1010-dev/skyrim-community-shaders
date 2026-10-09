@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <span>
 #include <cfloat>  // For FLT_MAX
 #include <cstdio>
 #include <functional>
@@ -79,6 +80,9 @@ namespace Util
 	 *
 	 * Automatically applies the Subtext font role for consistent tooltip styling.
 	*/
+	/** @brief "Select all" and "select none" small buttons over a set of 0/1 flags. */
+	void DrawSelectionButtons(std::span<uint8_t> selected, const char* selectAll, const char* selectNone);
+
 	class HoverTooltipWrapper
 	{
 	private:

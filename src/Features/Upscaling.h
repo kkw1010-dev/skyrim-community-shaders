@@ -4,6 +4,7 @@
 #include "Upscaling/DX12SwapChain.h"
 #include "Upscaling/FidelityFX.h"
 #include "Upscaling/RCAS/RCAS.h"
+#include "Upscaling/NeuralRendering.h"
 #include "Upscaling/Streamline.h"
 #include <d3d11_4.h>
 #include <d3d12.h>
@@ -79,6 +80,10 @@ public:
 		bool reflexUseMarkersToOptimize = false;
 		bool reflexUseFPSLimit = false;
 		float reflexFPSLimit = 60.0f;
+		// DLSS Neural Rendering (NGX Feature 18), ported from Open Shaders; off until the user enables it.
+		bool neuralRenderingEnabled = false;
+		NR::Context::Profiles neuralRenderingContexts;
+		NR::Tuning neuralRenderingTuning;
 	};
 
 	Settings settings;
@@ -136,6 +141,8 @@ public:
 	virtual void Load() override;
 	virtual void PostPostLoad() override;
 	virtual void SetupResources() override;
+	/** @brief Propagates frame inactivity to NR temporal history. */
+	virtual void Reset() override { neuralRendering.Reset(settings.neuralRenderingEnabled, settings.neuralRenderingTuning.regionOfInterest, settings.neuralRenderingTuning.regionFit, settings.neuralRenderingTuning.regionGroup); }
 
 	UpscaleMethod GetUpscaleMethod() const;
 	FrameGenMethod GetFrameGenMethod() const;
@@ -152,6 +159,23 @@ public:
 	winrt::com_ptr<ID3D11ComputeShader> encodeTexturesCS[5];          // One for each UpscaleMethod
 	winrt::com_ptr<ID3D11ComputeShader> encodeTexturesCSDepthOutput;  // FSR + VR: converts R24G8_TYPELESS depth to R32_FLOAT
 	ID3D11ComputeShader* GetEncodeTexturesCS();
+
+	/** @brief Encoder outputs a caller binds; selects the permutation. */
+	enum class EncodeOutput : uint8_t
+	{
+		kMasksOnly,
+		kTypedDepth,  // converts R24G8_TYPELESS depth to R32_FLOAT
+		kCount
+	};
+
+	/** @brief Encoder permutations for callers outside the upscale pass (Neural Rendering's guides). */
+	Util::LazyShader<ID3D11ComputeShader> encodeTexturesCSVariants[5][static_cast<size_t>(EncodeOutput::kCount)];
+	ID3D11ComputeShader* GetEncodeTexturesCS(UpscaleMethod a_method, EncodeOutput a_output);
+
+	/** @brief The encoder's four inputs in slot order: TAA mask, normals, motion vectors, depth. */
+	using EncodeInputViews = std::array<ID3D11ShaderResourceView*, 4>;
+	/** @brief Fills the encoder inputs; on failure names the missing one in a_missing. */
+	bool GetEncodeInputs(EncodeInputViews& a_views, const char*& a_missing) const;
 
 	winrt::com_ptr<ID3D11PixelShader> depthRefractionUpscalePS;
 	ID3D11PixelShader* GetDepthRefractionUpscalePS();
@@ -221,6 +245,8 @@ public:
 	static inline FidelityFX fidelityFX;      ///< AMD FSR frame generation
 	static inline DX12SwapChain dx12SwapChain;
 	static inline RCAS rcas;  ///< Standalone RCAS sharpening for DLSS
+
+	NeuralRendering neuralRendering;  ///< DLSS Neural Rendering before upscaling (opt-in)
 
 	winrt::com_ptr<ID3D11PixelShader> copyDepthToSharedBufferPS;
 

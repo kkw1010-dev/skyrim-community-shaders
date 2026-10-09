@@ -11,6 +11,19 @@ namespace Util
 	std::string GetNameFromRTV(ID3D11RenderTargetView* a_rtv);
 	void SetResourceName(ID3D11DeviceChild* Resource, const char* Format, ...);
 
+	/** @brief The Texture2D description behind a view; false when the view is null or not on a Texture2D. */
+	bool GetTexture2DDesc(ID3D11View* View, D3D11_TEXTURE2D_DESC& OutDesc);
+
+	/**
+	 * @brief Identity bridge for code written against CommonLib v8, where RE:: renderer fields became
+	 *        REX::W32 types. The 05-29 CommonLib pin still uses the real D3D11 types.
+	 */
+	template <class T>
+	constexpr T AsReal(T a_value) noexcept
+	{
+		return a_value;
+	}
+
 	ID3D11DeviceChild* CompileShader(const wchar_t* FilePath, const std::vector<std::pair<const char*, const char*>>& Defines, const char* ProgramType, const char* Program = "main");
 
 	// Texture manipulation utilities

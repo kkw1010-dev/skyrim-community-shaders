@@ -174,9 +174,17 @@ void State::Debug()
 	}
 }
 
+void State::BindSharedDataCS(ID3D11DeviceContext* a_context, bool a_withFeatureData) const
+{
+	constexpr UINT kSharedDataRegister = 5;
+	ID3D11Buffer* buffers[]{ sharedDataCB->CB(), featureDataCB->CB() };
+	a_context->CSSetConstantBuffers(kSharedDataRegister, a_withFeatureData ? ARRAYSIZE(buffers) : 1, buffers);
+}
+
 void State::Reset()
 {
 	Feature::ForEachLoadedFeature("Reset", [](Feature* feature) { feature->Reset(); });
+	worldRenderedThisFrame = false;
 	if (!globals::game::ui->GameIsPaused())
 		timer += RE::GetSecondsSinceLastFrame();
 

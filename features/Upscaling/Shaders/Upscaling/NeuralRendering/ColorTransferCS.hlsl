@@ -1,4 +1,5 @@
 #include "Common/Color.hlsli"
+#include "Upscaling/NeuralRendering/ColorCompat.hlsli"
 #include "Common/NeuralRenderingCategory.hlsli"
 #include "Common/RegionFeather.hlsli"
 #include "Common/RegionOverlay.hlsli"

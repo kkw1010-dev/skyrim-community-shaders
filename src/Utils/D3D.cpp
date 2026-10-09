@@ -533,4 +533,21 @@ namespace Util
 
 		return S_OK;
 	}
+	bool GetTexture2DDesc(ID3D11View* View, D3D11_TEXTURE2D_DESC& OutDesc)
+	{
+		if (!View)
+			return false;
+
+		winrt::com_ptr<ID3D11Resource> resource;
+		View->GetResource(resource.put());
+		if (!resource)
+			return false;
+
+		winrt::com_ptr<ID3D11Texture2D> texture;
+		if (FAILED(resource->QueryInterface(IID_PPV_ARGS(texture.put()))))
+			return false;
+
+		texture->GetDesc(&OutDesc);
+		return true;
+	}
 }  // namespace Util
