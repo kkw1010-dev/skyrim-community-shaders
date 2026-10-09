@@ -64,7 +64,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingTestCycleSeconds,
 	neuralRenderingTestCyclePlacements,
 	neuralRenderingTestCycleVariants,
-	neuralRenderingTestCycleScales);
+	neuralRenderingTestCycleScales,
+	neuralRenderingTestCycleMixes);
 
 decltype(&D3D11CreateDeviceAndSwapChain) ptrD3D11CreateDeviceAndSwapChainUpscaling;
 
@@ -663,12 +664,12 @@ void Upscaling::LoadSettings(json& o_json)
 	settings.neuralRenderingTuning.Sanitize();
 	settings.neuralRenderingContexts.Sanitize();
 	settings.neuralRenderingPlacement = std::min(settings.neuralRenderingPlacement, NeuralRendering::kMaxPlacement);
-	settings.neuralRenderingMix = std::isfinite(settings.neuralRenderingMix) ? std::clamp(settings.neuralRenderingMix, 0.0f, 1.0f) : 1.0f;
+	settings.neuralRenderingMix = std::isfinite(settings.neuralRenderingMix) ? std::clamp(settings.neuralRenderingMix, 0.0f, NR::Tuning::kMaxMix) : 1.0f;
 	neuralRendering.ResetHistory();
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
 	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements, settings.neuralRenderingTestCycleVariants,
-		settings.neuralRenderingTestCycleScales);
+		settings.neuralRenderingTestCycleScales, settings.neuralRenderingTestCycleMixes);
 
 	// Sanitize loaded settings to ensure enum indices are valid
 	constexpr auto enumCount = 4;  // UpscaleMethod has 4 values: kNONE, kTAA, kFSR, kDLSS
@@ -716,7 +717,7 @@ void Upscaling::RestoreDefaultSettings()
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
 	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements, settings.neuralRenderingTestCycleVariants,
-		settings.neuralRenderingTestCycleScales);
+		settings.neuralRenderingTestCycleScales, settings.neuralRenderingTestCycleMixes);
 }
 
 void Upscaling::ToggleNeuralRendering()

@@ -85,7 +85,7 @@ public:
 		bool neuralRenderingEnabled = false;
 		// Where NR runs: 0 before upscaling (Open Shaders' placement), 1 on the final image (NeuralRendering::Placement).
 		uint32_t neuralRenderingPlacement = 0;
-		// Share of NR's result shown, 0 to 1.
+		// Share of NR's edit shown, 0 to 2: above 1 extrapolates it.
 		float neuralRenderingMix = 1.0f;
 		NR::Context::Profiles neuralRenderingContexts;
 		NR::Tuning neuralRenderingTuning;
@@ -101,6 +101,8 @@ public:
 		bool neuralRenderingTestCycleVariants = false;
 		// Test aid: the test cycle's NR turns run on the final image at each of run set 7's working scales.
 		bool neuralRenderingTestCycleScales = false;
+		// Test aid: the test cycle's NR turns step through run set 8's mix x local tone / structure pairs on the final image.
+		bool neuralRenderingTestCycleMixes = false;
 	};
 
 	/** @brief The saved NR placement, clamped to a known one. */

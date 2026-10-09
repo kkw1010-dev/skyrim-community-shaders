@@ -39,7 +39,7 @@ cbuffer ColorTransfer : register(b0)
 	uint RegionActorBaseY;
 	uint RegionActorWidth;
 	uint RegionActorHeight;
-	float Mix;  // share of NR's edit applied, 0..1 (the user's mix slider)
+	float Mix;  // share of NR's edit applied, 0..2 (the user's mix slider; above 1 extrapolates)
 	uint ToneTransfer;  // NR::Tuning: 0 bounded luminance gain, 1 ACES round trip
 	// Tone multiplier per category, Skin..Landscape in .x; 16-byte rows mirror the C++ struct.
 	float4 CategoryStrength[5];
@@ -382,7 +382,7 @@ float ToneLowAt(int2 pixel, float centerDelta)
 	const bool acesRoundTrip = CompositeMode == NR::kCompositeProduction && ToneTransfer == kToneTransferAces;
 	const bool boundedGain = CompositeMode == NR::kCompositeProduction && !acesRoundTrip;
 	if (boundedGain)
-		result = original.rgb * NR::CompositeGain(tone * saturate(protectionWeight) * saturate(Mix), NR::kMaxToneStops);
+		result = original.rgb * NR::CompositeGain(tone * saturate(protectionWeight) * clamp(Mix, 0.0, 2.0), NR::kMaxToneStops);
 	if (acesRoundTrip) {
 		// Inverse of Prepare's encode, then the original HDR wherever the pixel is bright and in the ACES
 		// shoulder, where the inverse cannot be trusted (remix / Dagor thresholds 1, 8, 0.75, 0.99).
@@ -391,7 +391,7 @@ float ToneLowAt(int2 pixel, float centerDelta)
 		const float3 decoded = AcesNarkowiczInverse(ProxySrgbToLinear(rawNeural)) / proxyExposure;
 		const float recovery = smoothstep(1.0, 8.0, Color::RGBToLuminance(exposed, Luma)) *
 		                       smoothstep(0.75, 0.99, Color::RGBToLuminance(AcesNarkowicz(exposed), Luma));
-		result = lerp(originalLinear, lerp(decoded, originalLinear, recovery), saturate(Mix) * FilteredCategoryStrength(int2(id.xy)));
+		result = max(lerp(originalLinear, lerp(decoded, originalLinear, recovery), clamp(Mix, 0.0, 2.0) * FilteredCategoryStrength(int2(id.xy))), 0.0);
 	}
 	if (CompositeMode == NR::kCompositeReplacement)
 		result = neuralLinear;

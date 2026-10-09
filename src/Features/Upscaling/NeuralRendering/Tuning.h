@@ -14,6 +14,12 @@ namespace NR
 	{
 		static constexpr float kMinStrength = 0.0f, kMaxStrength = 2.0f;
 		static constexpr float kDefaultStrength = 1.0f, kAutomaticSkinStructure = -1.0f;
+		/** @brief Local tone and structure: runtime 310.8 reads them up to 1 (others measured the cap). */
+		static constexpr float kMaxLocalStrength = 1.0f;
+		/** @brief The user's play default for skin structure (10-09); 310.8 reads only 0.00-0.99. */
+		static constexpr float kDefaultSkinStructure = 0.5f;
+		/** @brief The share of NR's edit: above 1 extrapolates it (orig + mix * (NR - orig)). */
+		static constexpr float kMaxMix = 2.0f;
 		static constexpr uint32_t kMaxStyle = 2;
 		static constexpr uint32_t kRegionFitPadded = 0, kRegionFitTight = 1, kMaxRegionFit = kRegionFitTight;
 		/** @brief How the before-upscaling pass carries the scene to NR and back (ColorTransferCS ToneTransfer). */
@@ -24,7 +30,7 @@ namespace NR
 		float intensity = kDefaultStrength;
 		float localToneStrength = kDefaultStrength;
 		float localStructureStrength = kDefaultStrength;
-		float skinStructureStrength = kAutomaticSkinStructure;
+		float skinStructureStrength = kDefaultSkinStructure;
 		/** @brief Per-category multipliers on the composited tone edit, from the deferred Masks2 category. */
 		float skinToneStrength = kDefaultStrength;
 		float hairToneStrength = kDefaultStrength;
@@ -43,7 +49,7 @@ namespace NR
 		 *        the model runs on a downscaled copy and only its edit is upscaled onto the full frame
 		 *        (base + up(NR(low)) - up(low)); its cost falls with the pixel count (0.75 = 56 %).
 		 */
-		float finalScale = kMaxFinalScale;
+		float finalScale = 0.75f;  // run set 7: same look as 1.0, 69 instead of 55 real fps
 		/**
 		 * @brief Restricts NR's evaluation to a crop around the most prominent visible actor.
 		 *        Off by default: it trades full-frame NR quality for GPU time, and the
@@ -149,6 +155,8 @@ namespace NR
 			for (auto* strength : { &intensity, &localToneStrength, &localStructureStrength,
 					 &skinToneStrength, &hairToneStrength, &eyeToneStrength, &foliageToneStrength, &landscapeToneStrength })
 				*strength = std::isfinite(*strength) ? std::clamp(*strength, kMinStrength, kMaxStrength) : kDefaultStrength;
+			localToneStrength = std::min(localToneStrength, kMaxLocalStrength);
+			localStructureStrength = std::min(localStructureStrength, kMaxLocalStrength);
 			skinStructureStrength = std::isfinite(skinStructureStrength) ?
 			                            std::clamp(skinStructureStrength, kAutomaticSkinStructure, kMaxStrength) :
 			                            kAutomaticSkinStructure;

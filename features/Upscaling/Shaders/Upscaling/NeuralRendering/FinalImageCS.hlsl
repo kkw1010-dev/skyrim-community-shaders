@@ -16,7 +16,7 @@ cbuffer FinalImage : register(b0)
 	uint OutputHeight;
 	uint RenderWidth;  // the rendered region in the top-left of the shared depth and motion
 	uint RenderHeight;
-	float Mix;         // share of the model's edit, 0..1
+	float Mix;         // share of the model's edit, 0..2 (above 1 extrapolates it)
 	uint WorkWidth;    // the model's working size
 	uint WorkHeight;
 	float Pad;
@@ -62,5 +62,11 @@ RWTexture2D<float4> Output : register(u0);
 		return;
 	}
 	const float3 input = NeuralInput.SampleLevel(LinearClamp, uv, 0).rgb;
-	Output[id.xy] = float4(saturate(original.rgb + (saturate(neural) - input) * saturate(Mix)), original.a);
+	const float3 base = saturate(original.rgb);
+	const float3 edit = (saturate(neural) - input) * clamp(Mix, 0.0, 2.0);
+	// A mix above 1 can push a channel out of range: shorten the whole edit instead of clipping channels one by
+	// one, so the pixel keeps its hue and only the strength is limited.
+	const float3 room = edit > 0.0 ? (1.0 - base) / max(edit, 1e-6) : (edit < 0.0 ? base / max(-edit, 1e-6) : 1.0);
+	const float limit = saturate(min(room.r, min(room.g, room.b)));
+	Output[id.xy] = float4(base + edit * limit, original.a);
 }

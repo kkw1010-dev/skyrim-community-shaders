@@ -130,6 +130,24 @@ namespace
 		{ "final-s100-skinauto", 1.0f, NR::Tuning::kAutomaticSkinStructure },
 	};
 
+	/** @brief One run of the mix test cycle (run set 8): NR on the final image with this mix and local strengths. */
+	struct TestCycleMix
+	{
+		const char* name;
+		float mix, localTone, localStructure;
+	};
+	// Tone / structure 1 / 1 is the default; 0.3 / 0.7 is dxvk-remix's.
+	constexpr TestCycleMix kTestCycleMixes[] = {
+		{ "mix050-t10s10", 0.5f, 1.0f, 1.0f },
+		{ "mix100-t10s10", 1.0f, 1.0f, 1.0f },
+		{ "mix150-t10s10", 1.5f, 1.0f, 1.0f },
+		{ "mix200-t10s10", 2.0f, 1.0f, 1.0f },
+		{ "mix050-t03s07", 0.5f, 0.3f, 0.7f },
+		{ "mix100-t03s07", 1.0f, 0.3f, 0.7f },
+		{ "mix150-t03s07", 1.5f, 0.3f, 0.7f },
+		{ "mix200-t03s07", 2.0f, 0.3f, 0.7f },
+	};
+
 	/**
 	 * @brief Runtime feature slot the final-image placement evaluates in: the second eye's, which flat
 	 *        rendering never uses. Its own NGX feature keeps the output-resolution history apart.
@@ -440,7 +458,7 @@ struct NeuralRendering::Impl
 	std::array<float, NR::MaterialStrength::kCount> materialMapStrength{};
 	NR::Diagnostics* captureDiagnostics = nullptr;
 	uint32_t captureFrame = UINT32_MAX;
-	/** @brief Share of NR's result shown, 0 to 1: the user's mix, set before each frame. */
+	/** @brief Share of NR's edit shown, 0 to 2 (above 1 extrapolates): the user's mix, set before each frame. */
 	float mix = 1.0f;
 	/** @brief The before-upscaling pass's NR::Tuning::toneTransfer this frame. */
 	uint32_t toneTransfer = NR::Tuning::kToneTransferGain;
@@ -1302,7 +1320,7 @@ struct NeuralRendering::Impl
 		context->CopyResource(pass.original->resource.get(), a_hudless);
 		NR::Diagnostics::CameraSample camera;
 		UpdateCamera(0, pass.position, pass.forward, pass.frame, a_reset, a_options, camera, false);
-		FinalImageData data{ pass.outputWidth, pass.outputHeight, a_renderWidth, a_renderHeight, std::clamp(mix, 0.0f, 1.0f), pass.width, pass.height };
+		FinalImageData data{ pass.outputWidth, pass.outputHeight, a_renderWidth, a_renderHeight, std::clamp(mix, 0.0f, NR::Tuning::kMaxMix), pass.width, pass.height };
 		finalImageBuffer->Update(data);
 		auto* buffer = finalImageBuffer->CB();
 		{
@@ -1457,8 +1475,9 @@ bool NeuralRendering::DialogueOpen()
 void NeuralRendering::SetupResources() { retryRequested = recreate = resetHistory = true; }
 void NeuralRendering::SetTestCapture(uint32_t a_frames) { testCaptureFrames.store(std::min(a_frames, kMaxTestCaptureFrames), std::memory_order_relaxed); }
 void NeuralRendering::SetUnitExposure(bool a_unit) { unitExposure.store(a_unit, std::memory_order_relaxed); }
-void NeuralRendering::SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales)
+void NeuralRendering::SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales, bool a_mixes)
 {
+	testCycleMixes.store(a_mixes, std::memory_order_relaxed);
 	testCycleSeconds.store(a_seconds ? std::max(a_seconds, kMinTestCycleSeconds) : 0, std::memory_order_relaxed);
 	testCyclePlacements.store(a_placements, std::memory_order_relaxed);
 	testCycleVariants.store(a_variants, std::memory_order_relaxed);
@@ -1515,13 +1534,16 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	const auto seconds = testCycleSeconds.load(std::memory_order_relaxed);
 	if (!a_enabled || !seconds || !testCaptureFrames.load(std::memory_order_relaxed) || !globals::state->worldRenderedThisFrame)
 		return a_enabled;
-	const bool scales = testCycleScales.load(std::memory_order_relaxed);
-	const bool variants = !scales && testCycleVariants.load(std::memory_order_relaxed);
-	const bool placements = !scales && !variants && testCyclePlacements.load(std::memory_order_relaxed);
+	const bool mixes = testCycleMixes.load(std::memory_order_relaxed);
+	const bool scales = !mixes && testCycleScales.load(std::memory_order_relaxed);
+	const bool variants = !mixes && !scales && testCycleVariants.load(std::memory_order_relaxed);
+	const bool placements = !mixes && !scales && !variants && testCyclePlacements.load(std::memory_order_relaxed);
 	const auto now = std::chrono::steady_clock::now();
 	if (testCycleTurn == UINT32_MAX) {
 		testCycleStart = now;
-		if (scales)
+		if (mixes)
+			logger::info("[NeuralRendering] test cycle: {} s turns of NR on the final image through {} mix and tone / structure pairs, each followed by a turn without NR", seconds, std::size(kTestCycleMixes));
+		else if (scales)
 			logger::info("[NeuralRendering] test cycle: {} s turns of NR on the final image at {} working scales, each followed by a turn without NR", seconds, std::size(kTestCycleScales));
 		else if (variants)
 			logger::info("[NeuralRendering] test cycle: {} s turns of NR before upscaling through {} variants, each followed by a turn without NR", seconds, std::size(kTestCycleVariants));
@@ -1537,6 +1559,11 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 		a_placement = turn % 4 == 0 ? Placement::kBeforeUpscaling : Placement::kFinalImage;
 	testCycleVariant = -1;
 	testCycleScale = -1;
+	testCycleMix = -1;
+	if (run && mixes) {
+		a_placement = Placement::kFinalImage;
+		testCycleMix = static_cast<int32_t>((turn / 2) % std::size(kTestCycleMixes));
+	}
 	if (run && variants) {
 		a_placement = Placement::kBeforeUpscaling;
 		testCycleVariant = static_cast<int32_t>((turn / 2) % std::size(kTestCycleVariants));
@@ -1546,6 +1573,7 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 		testCycleScale = static_cast<int32_t>((turn / 2) % std::size(kTestCycleScales));
 	}
 	const char* name = !run                  ? "off" :
+	                   testCycleMix >= 0     ? kTestCycleMixes[testCycleMix].name :
 	                   testCycleScale >= 0   ? kTestCycleScales[testCycleScale].name :
 	                   testCycleVariant >= 0 ? kTestCycleVariants[testCycleVariant].name :
 	                   placements            ? PlacementName(a_placement) :
@@ -1591,7 +1619,7 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	}
 	// The turn's last 1.5 s: NR's history, or its absence, has settled by then.
 	// Variant cycle: one more frame 1.5 s earlier, so each turn has a still-camera pair to measure flicker on.
-	if ((variants || scales) && !testCyclePairRequested && intoTurn >= seconds - 3.0) {
+	if ((variants || scales || mixes) && !testCyclePairRequested && intoTurn >= seconds - 3.0) {
 		testCyclePairRequested = true;
 		globals::features::upscaling.dx12SwapChain.RequestTestDump(std::format(L"t{:02}-{}-a", turn, std::wstring(name, name + std::strlen(name))));
 	}
@@ -1949,12 +1977,14 @@ void NeuralRendering::DrawSettings(bool& enabled, uint32_t& placement, float& mi
 		if (const char* unavailable = FinalImageUnavailableReason())
 			Util::Text::WrappedWarning(T(TKEY("placement_final_unavailable"), "Final image is unavailable (%s), so Neural Rendering runs before upscaling."), unavailable);
 	}
-	float mixPercent = std::clamp(mix, 0.0f, 1.0f) * 100.0f;
-	if (ImGui::SliderFloat(T(TKEY("mix"), "Mix"), &mixPercent, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
+	float mixPercent = std::clamp(mix, 0.0f, NR::Tuning::kMaxMix) * 100.0f;
+	if (ImGui::SliderFloat(T(TKEY("mix"), "Mix"), &mixPercent, 0.0f, NR::Tuning::kMaxMix * 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
 		mix = mixPercent / 100.0f;
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T(TKEY("mix_tooltip"),
-			"How much of Neural Rendering's result is shown: 0% leaves the frame as it was, 100% shows all of it. It changes what is shown, not the GPU time."));
+			"How much of Neural Rendering's edit is shown: 0% leaves the frame as it was, 100% shows all of it.\n"
+			"Above 100% strengthens the effect by extrapolating the edit; too much exaggerates colour and hair.\n"
+			"It changes what is shown, not the GPU time."));
 	int style = static_cast<int>(std::min(tuning.style, NR::Tuning::kMaxStyle));
 	const std::array<const char*, NR::Tuning::kMaxStyle + 1> styleLabels{
 		T(TKEY("style_0"), "Style 0"),
@@ -1967,9 +1997,13 @@ void NeuralRendering::DrawSettings(bool& enabled, uint32_t& placement, float& mi
 		tuning.style = static_cast<uint32_t>(style);
 	changed |= ImGui::SliderFloat(T(TKEY("intensity"), "Intensity"), &tuning.intensity, NR::Tuning::kMinStrength, NR::Tuning::kMaxStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	recreateTuning |= ImGui::IsItemDeactivatedAfterEdit();
-	changed |= ImGui::SliderFloat(T(TKEY("local_tone"), "Local Tone Strength"), &tuning.localToneStrength, NR::Tuning::kMinStrength, NR::Tuning::kMaxStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	changed |= ImGui::SliderFloat(T(TKEY("local_tone"), "Local Tone Strength"), &tuning.localToneStrength, NR::Tuning::kMinStrength, NR::Tuning::kMaxLocalStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("local_tone_tooltip"), "Lighting and colour change NR makes; the strongest look control and most of its darkening.\nDefault 1; NVIDIA's dxvk-remix uses 0.3 with structure 0.7 for a lighter touch."));
 	recreateTuning |= ImGui::IsItemDeactivatedAfterEdit();
-	changed |= ImGui::SliderFloat(T(TKEY("local_structure"), "Local Structure Strength"), &tuning.localStructureStrength, NR::Tuning::kMinStrength, NR::Tuning::kMaxStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	changed |= ImGui::SliderFloat(T(TKEY("local_structure"), "Local Structure Strength"), &tuning.localStructureStrength, NR::Tuning::kMinStrength, NR::Tuning::kMaxLocalStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("local_structure_tooltip"), "Fine detail NR adds: skin, hair strands, surfaces.\nDefault 1; dxvk-remix uses 0.7."));
 	recreateTuning |= ImGui::IsItemDeactivatedAfterEdit();
 	changed |= ImGui::SliderFloat(T(TKEY("skin_structure"), "Skin Structure Strength"), &tuning.skinStructureStrength, NR::Tuning::kAutomaticSkinStructure, NR::Tuning::kMaxStrength,
 		tuning.skinStructureStrength == NR::Tuning::kAutomaticSkinStructure ? T(TKEY("skin_auto"), "Auto") : "%.2f", ImGuiSliderFlags_AlwaysClamp);
@@ -2306,7 +2340,7 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, Placement placement, flo
 			work.finalPrepare.Reset();
 			work.finalComposite.Reset();
 		}
-		work.mix = std::clamp(mix, 0.0f, 1.0f);
+		work.mix = std::clamp(mix, 0.0f, NR::Tuning::kMaxMix);
 		if (placement == Placement::kFinalImage) {
 			// The other placement's resources go once; the final-image pass makes its own at output size.
 			if (work.HasBeforeUpscalingResources())
@@ -2326,6 +2360,12 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, Placement placement, flo
 			if (testCycleScale >= 0) {
 				boundedTuning.finalScale = kTestCycleScales[testCycleScale].scale;
 				boundedTuning.skinStructureStrength = kTestCycleScales[testCycleScale].skinStructure;
+			}
+			if (testCycleMix >= 0) {
+				const auto& variant = kTestCycleMixes[testCycleMix];
+				work.mix = variant.mix;
+				boundedTuning.localToneStrength = variant.localTone;
+				boundedTuning.localStructureStrength = variant.localStructure;
 			}
 			finalRequest.pending = true;
 			finalRequest.frame = state->frameCount;

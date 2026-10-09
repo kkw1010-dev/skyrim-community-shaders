@@ -180,7 +180,7 @@ struct NeuralRendering
 	 * @param a_scales True makes the runs step through kTestCycleScales on the final image (run set 7); it takes
 	 *        precedence over both.
 	 */
-	void SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales);
+	void SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales, bool a_mixes);
 
 private:
 	struct Impl;
@@ -216,6 +216,10 @@ private:
 	std::atomic_bool testCycleScales = false;
 	/** @brief Index into the working-scale table for the running turn; -1 when none applies. */
 	int32_t testCycleScale = -1;
+	/** @brief The test cycle's runs step through the mix x tone / structure table (run set 8). */
+	std::atomic_bool testCycleMixes = false;
+	/** @brief Index into the mix table for the running turn; -1 when none applies. */
+	int32_t testCycleMix = -1;
 	/** @brief When the test cycle's first turn began, and the turn last logged (even turns run NR). */
 	std::chrono::steady_clock::time_point testCycleStart{};
 	uint32_t testCycleTurn = UINT32_MAX;
