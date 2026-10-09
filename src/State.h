@@ -210,6 +210,11 @@ public:
 		return IsMainOrLoadingMenuOpen() ||
 		       (ui && (ui->IsMenuOpen(RE::MainMenu::MENU_NAME) || ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME)));
 	}
+	/** @brief Gameplay is paused or suspended behind a menu. Cached menus are kept explicit in case a mod clears kPausesGame. */
+	bool IsPausedOrMenuOpen(RE::UI* ui) const
+	{
+		return (ui && ui->GameIsPaused()) || IsMainOrLoadingMenuOpen(ui) || isMapMenuOpen;
+	}
 
 	void UpdateSharedData(bool a_inWorld, bool a_prepass);
 	/** @brief Binds SharedData (b5) and, optionally, FeatureData (b6) for a compute pass. */

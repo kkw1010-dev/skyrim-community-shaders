@@ -70,6 +70,113 @@ namespace
 
 	/** @brief Colour the preview draws the tracked actor's projected box in; the shader outline uses the same yellow. */
 	constexpr ImU32 kActorBoxPreviewColor = IM_COL32(255, 255, 0, 255);
+
+	/**
+	 * @brief Applied NR frames before a test capture starts, so the temporal history has settled. Later
+	 *        than the DLSS-G input dump (composed frame 600), so that dump's stall misses the captured frames.
+	 */
+	constexpr uint32_t kTestCaptureAfterFrames = 900;
+
+	/** @brief Most consecutive frames one test capture holds; each frame keeps two render-size copies. */
+	constexpr uint32_t kMaxTestCaptureFrames = 8;
+
+	/**
+	 * @brief GPU time of the NR pass from D3D11 timestamps: the encoder, the D3D12 evaluate the
+	 *        immediate context waits on, and the composite. Results are read a few frames late so
+	 *        the readback never stalls, and the average is logged every kReportFrames samples.
+	 */
+	class PassTimer
+	{
+	public:
+		/** @brief Times the enclosing block; the destructor ends the measurement on every exit path. */
+		class Scope
+		{
+		public:
+			explicit Scope(PassTimer& a_timer) :
+				timer(a_timer) { timer.Begin(); }
+			~Scope() { timer.End(); }
+			Scope(const Scope&) = delete;
+			Scope& operator=(const Scope&) = delete;
+
+		private:
+			PassTimer& timer;
+		};
+
+	private:
+		static constexpr uint32_t kSlots = 4;
+		static constexpr uint32_t kReportFrames = 600;
+		struct Slot
+		{
+			winrt::com_ptr<ID3D11Query> disjoint, begin, end;
+			bool pending = false;
+		};
+
+		void Begin()
+		{
+			auto& slot = slots[next];
+			Collect(slot);
+			if (!slot.disjoint && !Create(slot))
+				return;
+			globals::d3d::context->Begin(slot.disjoint.get());
+			globals::d3d::context->End(slot.begin.get());
+			open = true;
+		}
+
+		void End()
+		{
+			if (!open)
+				return;
+			auto& slot = slots[next];
+			globals::d3d::context->End(slot.end.get());
+			globals::d3d::context->End(slot.disjoint.get());
+			slot.pending = true;
+			open = false;
+			next = (next + 1) % kSlots;
+		}
+
+		static bool Create(Slot& a_slot)
+		{
+			const D3D11_QUERY_DESC disjointDesc{ D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+			const D3D11_QUERY_DESC stampDesc{ D3D11_QUERY_TIMESTAMP, 0 };
+			auto* device = globals::d3d::device;
+			if (SUCCEEDED(device->CreateQuery(&disjointDesc, a_slot.disjoint.put())) && SUCCEEDED(device->CreateQuery(&stampDesc, a_slot.begin.put())) &&
+				SUCCEEDED(device->CreateQuery(&stampDesc, a_slot.end.put())))
+				return true;
+			a_slot = {};
+			return false;
+		}
+
+		/** @brief Adds the slot's sample when its queries are ready; a slot that is still busy is dropped. */
+		void Collect(Slot& a_slot)
+		{
+			if (!a_slot.pending)
+				return;
+			a_slot.pending = false;
+			auto* context = globals::d3d::context;
+			D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+			UINT64 begin = 0, end = 0;
+			constexpr UINT kNoFlush = D3D11_ASYNC_GETDATA_DONOTFLUSH;
+			if (context->GetData(a_slot.disjoint.get(), &disjoint, sizeof(disjoint), kNoFlush) != S_OK || disjoint.Disjoint || !disjoint.Frequency ||
+				context->GetData(a_slot.begin.get(), &begin, sizeof(begin), kNoFlush) != S_OK ||
+				context->GetData(a_slot.end.get(), &end, sizeof(end), kNoFlush) != S_OK || end < begin)
+				return;
+			const double ms = static_cast<double>(end - begin) * 1000.0 / static_cast<double>(disjoint.Frequency);
+			minMs = samples ? std::min(minMs, ms) : ms;
+			maxMs = samples ? std::max(maxMs, ms) : ms;
+			sumMs += ms;
+			if (++samples < kReportFrames)
+				return;
+			logger::info("[NeuralRendering] GPU time over {} frames: avg {:.3f} ms, min {:.3f} ms, max {:.3f} ms", samples, sumMs / samples, minMs, maxMs);
+			samples = 0;
+			sumMs = minMs = maxMs = 0.0;
+		}
+
+		std::array<Slot, kSlots> slots;
+		uint32_t next = 0;
+		bool open = false;
+		uint32_t samples = 0;
+		double sumMs = 0.0, minMs = 0.0, maxMs = 0.0;
+	};
 }
 
 struct NeuralRendering::Impl
@@ -186,6 +293,16 @@ struct NeuralRendering::Impl
 	std::array<float, NR::MaterialStrength::kCount> materialMapStrength{};
 	NR::Diagnostics* captureDiagnostics = nullptr;
 	uint32_t captureFrame = UINT32_MAX;
+	PassTimer passTimer;
+	/** @brief One frame of a test capture: render-size copies of the scene before and after NR. */
+	struct TestFrame
+	{
+		winrt::com_ptr<ID3D11Texture2D> before, after;
+		uint32_t frame = 0;
+	};
+	std::vector<TestFrame> testFrames;
+	/** @brief Frames of the running test capture already copied; the files are written once all are in. */
+	uint32_t testFramesCopied = 0;
 
 	~Impl()
 	{
@@ -479,7 +596,9 @@ struct NeuralRendering::Impl
 		auto buffer = colorBuffer->CB();
 		context->CSSetConstantBuffers(0, 1, &buffer);
 		globals::state->BindSharedDataCS(context.get(), true);
-		auto* masks2 = Util::AsReal(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kRAWINDIRECT_PREVIOUS_DOWNSCALED].SRV);
+		// 05-29 writes no material category lane, so that target holds engine data; bind it only when it
+		// is the R16G16 lane. Unbound, every pixel decodes as uncategorised and the category edits stay neutral.
+		auto* masks2 = MaterialLane();
 		ID3D11ShaderResourceView* inputs[]{ original->srv.get(), prepare ? nullptr : eye.color->srv,
 			prepare ? nullptr : eye.output->srv, exposure,
 			data.hasToneData ? eye.toneData->srv.get() : nullptr, masks2 };
@@ -545,6 +664,54 @@ struct NeuralRendering::Impl
 			return false;
 		}
 		return true;
+	}
+
+	/**
+	 * @brief Allocates the copies for a test capture of the next a_frames NR frames. Copying on the
+	 *        GPU and writing only after the last frame keeps the captured frames free of readback stalls.
+	 * @return False when the pass resources or a copy texture are missing.
+	 */
+	bool StartTestCapture(uint32_t a_frames)
+	{
+		testFrames.clear();
+		testFramesCopied = 0;
+		if (!original || !eyes[0].resolved)
+			return false;
+		const auto copyDesc = [](D3D11_TEXTURE2D_DESC a_desc) {
+			a_desc.Usage = D3D11_USAGE_DEFAULT;
+			a_desc.BindFlags = 0;
+			a_desc.CPUAccessFlags = 0;
+			a_desc.MiscFlags = 0;
+			return a_desc;
+		};
+		const auto beforeDesc = copyDesc(original->desc);
+		const auto afterDesc = copyDesc(eyes[0].resolved->desc);
+		testFrames.resize(a_frames);
+		for (auto& frame : testFrames) {
+			if (FAILED(globals::d3d::device->CreateTexture2D(&beforeDesc, nullptr, frame.before.put())) ||
+				FAILED(globals::d3d::device->CreateTexture2D(&afterDesc, nullptr, frame.after.put()))) {
+				testFrames.clear();
+				return false;
+			}
+			Util::SetResourceName(frame.before.get(), "NeuralRendering::TestBefore");
+			Util::SetResourceName(frame.after.get(), "NeuralRendering::TestAfter");
+		}
+		return true;
+	}
+
+	/** @brief True once every frame of the running test capture has been copied. */
+	bool TestCaptureComplete() const { return !testFrames.empty() && testFramesCopied == testFrames.size(); }
+
+	/** @brief Writes the finished test capture as lossless DDS through the diagnostics writer, then frees the copies. */
+	void WriteTestCapture(NR::Diagnostics& diagnostics)
+	{
+		for (const auto& frame : testFrames) {
+			diagnostics.DumpTexture("test_before", frame.before.get(), frame.frame);
+			diagnostics.DumpTexture("test_after", frame.after.get(), frame.frame);
+		}
+		logger::info("[NeuralRendering] test capture written: {} frames", testFrames.size());
+		testFrames.clear();
+		testFramesCopied = 0;
 	}
 
 	bool Draw(ID3D11Texture2D* color, ID3D11ShaderResourceView* const* inputs, ID3D11ComputeShader* shader, uint32_t reset, bool materialStrengthWanted, const NR::MaterialStrength::Values& materialStrengths, const NR::Tuning& tuning, NR::Diagnostics::Frame& diagnostic, NR::Diagnostics& diagnostics)
@@ -718,6 +885,12 @@ struct NeuralRendering::Impl
 		}
 		if (capture)
 			diagnostics.DumpTexture("04_post_composite", color, diagnostic.number);
+		if (testFramesCopied < testFrames.size()) {
+			auto& copy = testFrames[testFramesCopied++];
+			context->CopyResource(copy.before.get(), original->resource.get());
+			context->CopyResource(copy.after.get(), eyes[0].resolved->resource.get());
+			copy.frame = diagnostic.number;
+		}
 		// Capture stays open for Main_PostProcessing's pre-SR/post-SR stages; CaptureAfterUpscaling finishes it.
 		captureDiagnostics = nullptr;
 		return true;
@@ -817,6 +990,7 @@ bool NeuralRendering::DialogueOpen()
 }
 
 void NeuralRendering::SetupResources() { retryRequested = recreate = resetHistory = true; }
+void NeuralRendering::SetTestCapture(uint32_t a_frames) { testCaptureFrames.store(std::min(a_frames, kMaxTestCaptureFrames), std::memory_order_relaxed); }
 void NeuralRendering::ResetHistory() { resetHistory = true; }
 void NeuralRendering::ClearShaderCache() { retryRequested = clearShaders = resetHistory = true; }
 
@@ -1159,7 +1333,12 @@ void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& context
 	changed |= ImGui::SliderFloat(T(TKEY("skin_structure"), "Skin Structure Strength"), &tuning.skinStructureStrength, NR::Tuning::kAutomaticSkinStructure, NR::Tuning::kMaxStrength,
 		tuning.skinStructureStrength == NR::Tuning::kAutomaticSkinStructure ? T(TKEY("skin_auto"), "Auto") : "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	recreateTuning |= ImGui::IsItemDeactivatedAfterEdit();
-	if (ImGui::CollapsingHeader(T(TKEY("category_tone"), "Category Tone Strengths"))) {
+	// 05-29 writes no material category lane, so the controls that act only through it are hidden
+	// while it is missing and their saved values keep the neutral defaults.
+	const bool categoryLane = impl->MaterialLane() != nullptr;
+	if (!categoryLane)
+		Util::Text::Disabled("%s", T(TKEY("category_lane_missing"), "Category and material controls need the deferred material lane, which this build does not write."));
+	if (categoryLane && ImGui::CollapsingHeader(T(TKEY("category_tone"), "Category Tone Strengths"))) {
 		ImGui::PushID("categoryTone");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("category_tone_tooltip"),
@@ -1171,14 +1350,17 @@ void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& context
 		changed |= ImGui::SliderFloat(T(TKEY("category_landscape"), "Landscape"), &tuning.landscapeToneStrength, NR::Tuning::kMinStrength, NR::Tuning::kMaxStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		ImGui::PopID();
 	}
-	changed |= DrawMaterialControls(tuning, materialStrengthAvailable.load(std::memory_order_relaxed));
+	if (categoryLane)
+		changed |= DrawMaterialControls(tuning, materialStrengthAvailable.load(std::memory_order_relaxed));
+	// The 05-29 port has no actor-tracking hook yet (InstallHooks is empty), so the crop stays off.
+	ImGui::BeginDisabled(true);
 	if (ImGui::Checkbox(T(TKEY("region_of_interest"), "Limit to Tracked Actor"), &tuning.regionOfInterest)) {
 		changed = true;
 		resetHistory = true;
 	}
-	if (auto _tt = Util::HoverTooltipWrapper())
-		ImGui::TextUnformatted(T(TKEY("region_of_interest_tooltip"),
-			"Restricts Neural Rendering to a crop around the most prominent visible character, the one covering the most of the view with the centre favoured, and leaves the rest of the frame at pre-NR quality. Costs less GPU time when a character is on screen."));
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	Util::Text::Disabled("%s", T(TKEY("region_of_interest_unported"), "(not in this build)"));
 	if (globals::game::isVR) {
 		if (ImGui::Checkbox(T(TKEY("region_follow_foveation"), "Follow Foveation"), &tuning.regionFollowFoveation)) {
 			changed = true;
@@ -1441,6 +1623,7 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 			work.Initialize();
 			const auto luid = work.interop.AdapterLuid();
 			logger::debug("[NeuralRendering] D3D12 device on renderer adapter LUID {:08X}:{:08X}", luid.HighPart, luid.LowPart);
+			logger::info("[NeuralRendering] material category lane {}", work.MaterialLane() ? "present" : "absent; category and material edits stay neutral");
 		}
 		if (clearShaders.exchange(false)) {
 			work.prepareColor.Reset();
@@ -1553,7 +1736,21 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 		diagnostic.localTone = boundedTuning.localToneStrength;
 		diagnostic.localStructure = boundedTuning.localStructureStrength;
 		diagnostic.skinStructure = boundedTuning.skinStructureStrength;
-		const bool processed = work.Draw(color, inputs.data(), shader, reset, materialStrengthWanted, materialStrengths, boundedTuning, diagnostic, diagnostics);
+		const auto testCapture = testCaptureFrames.load(std::memory_order_relaxed);
+		if (testCapture && !testCaptureStarted && appliedFrames.load(std::memory_order_relaxed) >= kTestCaptureAfterFrames) {
+			testCaptureStarted = true;
+			if (work.StartTestCapture(testCapture))
+				logger::info("[NeuralRendering] test capture: the next {} frames, before and after NR", testCapture);
+			else
+				logger::warn("[NeuralRendering] test capture skipped: its copy textures could not be created");
+		}
+		bool processed = false;
+		{
+			const PassTimer::Scope timing(work.passTimer);
+			processed = work.Draw(color, inputs.data(), shader, reset, materialStrengthWanted, materialStrengths, boundedTuning, diagnostic, diagnostics);
+		}
+		if (work.TestCaptureComplete())
+			work.WriteTestCapture(diagnostics);
 		publishMaterialStrength();
 		if (!processed)
 			throw std::runtime_error(std::format("the NVIDIA runtime failed to process a frame. Update the GPU driver, then press Retry (NGX L/R 0x{:08X}/0x{:08X})",

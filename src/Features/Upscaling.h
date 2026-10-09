@@ -84,6 +84,8 @@ public:
 		bool neuralRenderingEnabled = false;
 		NR::Context::Profiles neuralRenderingContexts;
 		NR::Tuning neuralRenderingTuning;
+		// Test aid: frames of the once-per-session before/after NR capture (0 = off, at most 8).
+		uint32_t neuralRenderingTestCaptureFrames = 0;
 	};
 
 	Settings settings;

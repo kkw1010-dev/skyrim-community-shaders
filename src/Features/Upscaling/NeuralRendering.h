@@ -128,6 +128,12 @@ struct NeuralRendering
 	void RequestRetry() { retryRequested = resetHistory = true; }
 	/** @brief Queues one lossless DDS capture of every NR stage in the next NR frame. */
 	void RequestCapture() { diagnostics.RequestCapture(); }
+	/**
+	 * @brief Test aid of the 05-29 port: once per session, after NR has settled, copy the scene before
+	 *        and after NR on a_frames consecutive frames (at most 8) and write them as DDS under
+	 *        CommunityShaders\Captures. Zero, the default, turns it off.
+	 */
+	void SetTestCapture(uint32_t a_frames);
 
 private:
 	struct Impl;
@@ -145,6 +151,10 @@ private:
 	std::atomic<uint32_t> appliedFrames{ 0 };
 	/** @brief Per-eye NGX result of the last applied frame; survives a rebuild. */
 	std::array<std::atomic<uint32_t>, 2> lastNgxResult{};
+	/** @brief Frames the test capture copies; set from the settings, zero when off. */
+	std::atomic<uint32_t> testCaptureFrames{ 0 };
+	/** @brief The session's test capture has started; it runs once per session. */
+	bool testCaptureStarted = false;
 	mutable std::mutex statusMutex;
 	/** @brief True while the region-of-interest toggle is on and NR is enabled; the hook's off switch. */
 	std::atomic_bool regionEnabled = false;

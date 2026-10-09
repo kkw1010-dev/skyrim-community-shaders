@@ -33,13 +33,9 @@ namespace Util
 		return result;
 	}
 
-	/** @brief Case-insensitive equality for two strings. */
-	inline bool IEquals(std::string_view a, std::string_view b)
-	{
-		return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char ca, char cb) {
-			return std::tolower(static_cast<unsigned char>(ca)) == std::tolower(static_cast<unsigned char>(cb));
-		});
-	}
+	// IEquals is not repeated here: the 05-29 tree already defines Util::IEquals(std::string_view,
+	// std::string_view) out of line in Utils/Format.cpp, with the same ASCII case folding, and an
+	// inline copy would be a second definition of that symbol.
 
 	/**
 	 * @brief Extracts the lowercased filename stem from a path, requiring a given extension.
