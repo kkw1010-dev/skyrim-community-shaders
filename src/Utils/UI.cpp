@@ -45,6 +45,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "Utils/ResourceStream.h"
 
 namespace Util
 {
@@ -1888,6 +1889,7 @@ namespace Util
 
 		// Try to load from BSA using Skyrim's resource system
 		RE::BSResourceNiBinaryStream bsaStream(filename);
+		Util::BalanceStreamRelease(bsaStream);
 		if (!bsaStream.good()) {
 			logger::warn("LoadDDSTextureFromFile: Failed to open resource: {}", filename);
 			return false;
