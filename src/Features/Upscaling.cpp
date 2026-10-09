@@ -58,7 +58,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingContexts,
 	neuralRenderingTuning,
 	neuralRenderingTestCaptureFrames,
-	neuralRenderingUnitExposure);
+	neuralRenderingUnitExposure,
+	neuralRenderingTestCycleSeconds);
 
 decltype(&D3D11CreateDeviceAndSwapChain) ptrD3D11CreateDeviceAndSwapChainUpscaling;
 
@@ -653,6 +654,7 @@ void Upscaling::LoadSettings(json& o_json)
 	neuralRendering.ResetHistory();
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
+	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds);
 
 	// Sanitize loaded settings to ensure enum indices are valid
 	constexpr auto enumCount = 4;  // UpscaleMethod has 4 values: kNONE, kTAA, kFSR, kDLSS
@@ -699,6 +701,7 @@ void Upscaling::RestoreDefaultSettings()
 	neuralRendering.ResetHistory();
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
+	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds);
 }
 
 void Upscaling::ToggleNeuralRendering()

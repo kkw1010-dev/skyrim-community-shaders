@@ -82,6 +82,9 @@ namespace
 	/** @brief Most consecutive frames one test capture holds; each frame keeps two render-size copies. */
 	constexpr uint32_t kMaxTestCaptureFrames = 8;
 
+	/** @brief Shortest test-cycle turn: the capture needs kTestCaptureAfterFrames (about 5 s) after each start. */
+	constexpr uint32_t kMinTestCycleSeconds = 10;
+
 	/** @brief Side of the square pixel tile one SceneKeyCS Reduce group covers. */
 	constexpr uint32_t kSceneKeyTilePixels = 64;
 	/** @brief Most tiles the scene-key reduction holds: 16.7 megapixels per eye. */
@@ -1156,6 +1159,34 @@ bool NeuralRendering::DialogueOpen()
 void NeuralRendering::SetupResources() { retryRequested = recreate = resetHistory = true; }
 void NeuralRendering::SetTestCapture(uint32_t a_frames) { testCaptureFrames.store(std::min(a_frames, kMaxTestCaptureFrames), std::memory_order_relaxed); }
 void NeuralRendering::SetUnitExposure(bool a_unit) { unitExposure.store(a_unit, std::memory_order_relaxed); }
+void NeuralRendering::SetTestCycle(uint32_t a_seconds) { testCycleSeconds.store(a_seconds ? std::max(a_seconds, kMinTestCycleSeconds) : 0, std::memory_order_relaxed); }
+
+bool NeuralRendering::ApplyTestCycle(bool a_enabled)
+{
+	const auto seconds = testCycleSeconds.load(std::memory_order_relaxed);
+	if (!a_enabled || !seconds || !testCaptureFrames.load(std::memory_order_relaxed) || !globals::state->worldRenderedThisFrame)
+		return a_enabled;
+	const auto now = std::chrono::steady_clock::now();
+	if (testCycleTurn == UINT32_MAX) {
+		testCycleStart = now;
+		logger::info("[NeuralRendering] test cycle: {} s with NR, {} s without, in turns", seconds, seconds);
+	}
+	const double elapsed = std::chrono::duration<double>(now - testCycleStart).count();
+	const auto turn = static_cast<uint32_t>(elapsed / seconds);
+	const bool run = turn % 2 == 0;
+	if (turn != testCycleTurn) {
+		testCycleTurn = turn;
+		testCycleDumpRequested = false;
+		logger::info("[NeuralRendering] test cycle: turn {}, NR {}", turn, run ? "on" : "off");
+	}
+	// The turn's last 1.5 s: NR's history, or its absence, has settled by then.
+	if (!testCycleDumpRequested && elapsed - static_cast<double>(turn) * seconds >= seconds - 1.5) {
+		testCycleDumpRequested = true;
+		globals::features::upscaling.dx12SwapChain.RequestTestDump(std::format(L"t{:02}-{}", turn, run ? L"on" : L"off"));
+		logger::info("[NeuralRendering] test cycle: turn {} final frame requested", turn);
+	}
+	return run;
+}
 void NeuralRendering::ResetHistory() { resetHistory = true; }
 void NeuralRendering::ClearShaderCache() { retryRequested = clearShaders = resetHistory = true; }
 
@@ -1700,6 +1731,7 @@ void NeuralRendering::CaptureAfterUpscaling()
 void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize)
 {
 	using Outcome = NR::Diagnostics::Outcome;
+	enabled = ApplyTestCycle(enabled);
 	const auto context = NR::Context::Resolve(contexts, DialogueOpen(), contextState);
 	auto& diagnostic = diagnostics.BeginHook(globals::state->frameCount, target);
 	const auto action = NR::DecideFrame({ enabled, context.suspended, globals::state->worldRenderedThisFrame, impl->failed,

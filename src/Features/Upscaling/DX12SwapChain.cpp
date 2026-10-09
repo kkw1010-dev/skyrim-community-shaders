@@ -503,44 +503,43 @@ bool DX12SwapChain::ComposeDLSSGFrame()
 	static constexpr uint32_t kDumpAtComposedFrame = 600;
 	if (++dlssgComposedFrames == kDumpAtComposedFrame)
 		DumpDLSSGInputs();
+	if (!testDumpTag.empty()) {
+		WriteInputPng(hudlessBufferWrapped, L"CommunityShaders-NRTest-" + testDumpTag + L"-HUDless.png", false);
+		testDumpTag.clear();
+	}
 	return true;
 }
 
 void DX12SwapChain::DumpDLSSGInputs()
 {
-	const auto directory = logger::log_directory();
-	if (!directory)
-		return;
+	WriteInputPng(hudlessBufferWrapped, L"CommunityShaders-DLSSG-HUDless.png", false);
+	WriteInputPng(uiBufferWrapped, L"CommunityShaders-DLSSG-UI.png", true);
+	WriteInputPng(swapChainBufferWrapped, L"CommunityShaders-DLSSG-Final.png", false);
+}
 
-	struct DumpTarget
-	{
-		WrappedResource* resource;
-		const wchar_t* fileName;
-		bool keepAlpha;
-	};
-	const DumpTarget targets[] = {
-		{ hudlessBufferWrapped, L"CommunityShaders-DLSSG-HUDless.png", false },
-		{ uiBufferWrapped, L"CommunityShaders-DLSSG-UI.png", true },
-		{ swapChainBufferWrapped, L"CommunityShaders-DLSSG-Final.png", false },
-	};
-	for (const auto& target : targets) {
-		const auto path = *directory / target.fileName;
-		DirectX::ScratchImage captured;
-		DirectX::ScratchImage converted;
-		HRESULT result = DirectX::CaptureTexture(d3d11Device.get(), d3d11Context.get(), target.resource->resource11, captured);
-		const DirectX::Image* image = SUCCEEDED(result) ? captured.GetImage(0, 0, 0) : nullptr;
-		if (image && image->format != DXGI_FORMAT_R8G8B8A8_UNORM) {
-			result = DirectX::Convert(*image, DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, converted);
-			image = SUCCEEDED(result) ? converted.GetImage(0, 0, 0) : nullptr;
-		}
-		if (image)
-			result = DirectX::SaveToWICFile(*image, DirectX::WIC_FLAGS_NONE, DirectX::GetWICCodec(DirectX::WIC_CODEC_PNG), path.c_str(),
-				target.keepAlpha ? nullptr : &GUID_WICPixelFormat24bppBGR);
-		if (FAILED(result))
-			logger::warn("[DX12SwapChain] Failed to write DLSS-G input {}: HRESULT 0x{:08X}", path.string(), static_cast<uint32_t>(result));
-		else
-			logger::info("[DX12SwapChain] Wrote DLSS-G input {}", path.string());
+bool DX12SwapChain::WriteInputPng(WrappedResource* a_resource, const std::wstring& a_fileName, bool a_keepAlpha)
+{
+	const auto directory = logger::log_directory();
+	if (!directory || !a_resource)
+		return false;
+	const auto path = *directory / a_fileName;
+	DirectX::ScratchImage captured;
+	DirectX::ScratchImage converted;
+	HRESULT result = DirectX::CaptureTexture(d3d11Device.get(), d3d11Context.get(), a_resource->resource11, captured);
+	const DirectX::Image* image = SUCCEEDED(result) ? captured.GetImage(0, 0, 0) : nullptr;
+	if (image && image->format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+		result = DirectX::Convert(*image, DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, converted);
+		image = SUCCEEDED(result) ? converted.GetImage(0, 0, 0) : nullptr;
 	}
+	if (image)
+		result = DirectX::SaveToWICFile(*image, DirectX::WIC_FLAGS_NONE, DirectX::GetWICCodec(DirectX::WIC_CODEC_PNG), path.c_str(),
+			a_keepAlpha ? nullptr : &GUID_WICPixelFormat24bppBGR);
+	if (FAILED(result)) {
+		logger::warn("[DX12SwapChain] Failed to write DLSS-G input {}: HRESULT 0x{:08X}", path.string(), static_cast<uint32_t>(result));
+		return false;
+	}
+	logger::info("[DX12SwapChain] Wrote DLSS-G input {}", path.string());
+	return true;
 }
 
 HRESULT DX12SwapChain::GetDevice(REFIID uuid, void** ppDevice)

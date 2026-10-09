@@ -9,6 +9,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -139,6 +140,12 @@ struct NeuralRendering
 	 *        Processing's auto exposure or the scene key, so the two can be compared.
 	 */
 	void SetUnitExposure(bool a_unit);
+	/**
+	 * @brief Test aid: while the test capture is on, NR runs and rests in turns of a_seconds each, starting
+	 *        with a run, and asks DLSS-G for each turn's final HUD-less frame in its last 1.5 s, so an
+	 *        unattended run gets the same view with NR on and off. Zero, the default, turns it off.
+	 */
+	void SetTestCycle(uint32_t a_seconds);
 
 private:
 	struct Impl;
@@ -162,6 +169,14 @@ private:
 	uint32_t testCaptureAt = UINT32_MAX;
 	/** @brief Mirror of the unit-exposure test setting for the rendering thread. */
 	std::atomic_bool unitExposure = false;
+	/** @brief Length of one test-cycle turn in seconds; zero when off. */
+	std::atomic<uint32_t> testCycleSeconds{ 0 };
+	/** @brief When the test cycle's first turn began, and the turn last logged (even turns run NR). */
+	std::chrono::steady_clock::time_point testCycleStart{};
+	uint32_t testCycleTurn = UINT32_MAX;
+	bool testCycleDumpRequested = false;
+	/** @brief The test cycle's say on this frame: a_enabled, or false during a resting turn. */
+	bool ApplyTestCycle(bool a_enabled);
 	mutable std::mutex statusMutex;
 	/** @brief True while the region-of-interest toggle is on and NR is enabled; the hook's off switch. */
 	std::atomic_bool regionEnabled = false;

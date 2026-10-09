@@ -88,6 +88,8 @@ public:
 		uint32_t neuralRenderingTestCaptureFrames = 0;
 		// Test aid: true keeps stage 1's unit white point for the NR proxy instead of the scene exposure.
 		bool neuralRenderingUnitExposure = false;
+		// Test aid: with the test capture on, NR switches itself on and off in turns of this many seconds (0 = off, at least 10).
+		uint32_t neuralRenderingTestCycleSeconds = 0;
 	};
 
 	Settings settings;

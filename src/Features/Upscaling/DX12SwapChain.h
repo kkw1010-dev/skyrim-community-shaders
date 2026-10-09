@@ -179,6 +179,11 @@ public:
 	/** @brief Writes the HUD-less, UI and final DLSS-G inputs as PNGs next to the plugin log. */
 	void DumpDLSSGInputs();
 	uint32_t dlssgComposedFrames = 0;
+	/** @brief Writes one DLSS-G input as a PNG next to the plugin log; false, logged, on failure. */
+	bool WriteInputPng(WrappedResource* a_resource, const std::wstring& a_fileName, bool a_keepAlpha);
+	/** @brief Test aid: the next composed frame's HUD-less image is written as CommunityShaders-NRTest-<tag>-HUDless.png. */
+	void RequestTestDump(std::wstring a_tag) { testDumpTag = std::move(a_tag); }
+	std::wstring testDumpTag;
 	HRESULT GetDevice(_In_ REFIID riid, _COM_Outptr_ void** ppDevice);
 	HANDLE GetFrameLatencyWaitableObject();
 
