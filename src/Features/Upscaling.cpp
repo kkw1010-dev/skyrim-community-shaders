@@ -25,7 +25,7 @@ namespace NR
 		skinToneStrength, hairToneStrength, eyeToneStrength, foliageToneStrength, landscapeToneStrength,
 		style, useAutoMask, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
 		materialStrength, strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape,
-		strengthOther, strengthEdgeSoftness, showMaterialMap, materialMapMode, materialMapFilter);
+		strengthOther, strengthEdgeSoftness, showMaterialMap, materialMapMode, materialMapFilter, toneTransfer);
 }
 
 namespace NR::Context
@@ -62,7 +62,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingTestCaptureFrames,
 	neuralRenderingUnitExposure,
 	neuralRenderingTestCycleSeconds,
-	neuralRenderingTestCyclePlacements);
+	neuralRenderingTestCyclePlacements,
+	neuralRenderingTestCycleVariants);
 
 decltype(&D3D11CreateDeviceAndSwapChain) ptrD3D11CreateDeviceAndSwapChainUpscaling;
 
@@ -665,7 +666,7 @@ void Upscaling::LoadSettings(json& o_json)
 	neuralRendering.ResetHistory();
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
-	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements);
+	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements, settings.neuralRenderingTestCycleVariants);
 
 	// Sanitize loaded settings to ensure enum indices are valid
 	constexpr auto enumCount = 4;  // UpscaleMethod has 4 values: kNONE, kTAA, kFSR, kDLSS
@@ -712,7 +713,7 @@ void Upscaling::RestoreDefaultSettings()
 	neuralRendering.ResetHistory();
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
-	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements);
+	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements, settings.neuralRenderingTestCycleVariants);
 }
 
 void Upscaling::ToggleNeuralRendering()

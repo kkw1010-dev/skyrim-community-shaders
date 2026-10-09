@@ -175,8 +175,10 @@ struct NeuralRendering
 	 *        unattended run gets the same view with NR on and off. Each turn logs its real and output
 	 *        frame rates and NR's GPU time. Zero, the default, turns it off.
 	 * @param a_placements True makes the runs alternate placements: before upscaling, rest, final image, rest.
+	 * @param a_variants True makes the runs step through kTestCycleVariants instead (before upscaling only:
+	 *        skin structure, tone transfer, and one run without depth); it takes precedence over a_placements.
 	 */
-	void SetTestCycle(uint32_t a_seconds, bool a_placements);
+	void SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants);
 
 private:
 	struct Impl;
@@ -204,6 +206,10 @@ private:
 	std::atomic<uint32_t> testCycleSeconds{ 0 };
 	/** @brief The test cycle's runs alternate the two placements. */
 	std::atomic_bool testCyclePlacements = false;
+	/** @brief The test cycle's runs step through the variants (run set 6). */
+	std::atomic_bool testCycleVariants = false;
+	/** @brief Index into the variant table for the running turn; -1 when no variant applies. */
+	int32_t testCycleVariant = -1;
 	/** @brief When the test cycle's first turn began, and the turn last logged (even turns run NR). */
 	std::chrono::steady_clock::time_point testCycleStart{};
 	uint32_t testCycleTurn = UINT32_MAX;

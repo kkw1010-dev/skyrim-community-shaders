@@ -199,6 +199,32 @@ namespace NR
 			int& floatSlot;
 		};
 
+		/**
+		 * @brief Logs what each key reads back as, once after a feature's first evaluate. NGX keeps a value
+		 *        under the type it was set with and reads a mismatched type as the default, so a tuning key
+		 *        that shows only under the other type, or not at all, never reached the model.
+		 */
+		void LogParameterReadBack(NVSDK_NGX_Parameter* parameters, uint32_t eyeIndex)
+		{
+			static constexpr const char* keys[] = { "DLSSNR.Style", "DLSSNR.Intensity", "DLSSNR.LocalToneStrength",
+				"DLSSNR.LocalStructureStrength", "DLSSNR.SkinStructureStrength", "DLSSNR.UseAutoMask", "DLSSNR.UICorrection",
+				"DLSSNR.Reset", "DLSSNR.Enabled", "DLSSNR.DepthInverted", "DLSSNR.MVecScaleX", "DLSSNR.MVecScaleY",
+				"DLSSNR.Width", "DLSSNR.Height", "DLSSNR.ColorSubrectWidth", "DLSSNR.DepthSubrectWidth", "DLSSNR.MVecSubrectWidth",
+				"PerfQualityValue", "Feature_Flags", "Sharpness" };
+			std::string table;
+			for (const auto* key : keys) {
+				unsigned int asUInt = 0;
+				float asFloat = 0.0f;
+				NVSDK_NGX_Result uintResult = NVSDK_NGX_Result_Fail, floatResult = NVSDK_NGX_Result_Fail;
+				const bool uintSafe = Util::SehGuarded([&] { uintResult = parameters->Get(key, &asUInt); });
+				const bool floatSafe = Util::SehGuarded([&] { floatResult = parameters->Get(key, &asFloat); });
+				table += std::format("\n    {:<32} uint {:<12} float {}", key,
+					!uintSafe ? "fault" : NVSDK_NGX_SUCCEED(uintResult) ? std::to_string(asUInt) : "-",
+					!floatSafe ? "fault" : NVSDK_NGX_SUCCEED(floatResult) ? std::format("{:.3f}", asFloat) : "-");
+			}
+			logger::info("[NeuralRendering] Eye {} parameters as read back after the first evaluate:{}", eyeIndex, table);
+		}
+
 		/** @brief Writes the appearance parameters Feature 18 needs at creation and evaluation. */
 		void WriteTuning(ParameterWriter& writer, const Tuning& tuning, const ProtectionResources& protection)
 		{
@@ -509,23 +535,16 @@ namespace NR
 			writer.SetUInt("NVSDK_NGX_Parameter_PerfQualityValue", static_cast<unsigned int>(NVSDK_NGX_PerfQuality_Value_Balanced));
 			writer.SetUInt("NVSDK_NGX_Parameter_CreationNodeMask", 1u);
 			writer.SetUInt("NVSDK_NGX_Parameter_VisibilityNodeMask", 1u);
-			writer.SetFloat("DLSSNR.Scale", 1.0f);
-			writer.SetFloat("DLSSNR.ScalingRatio", 1.0f);
-			writer.SetUInt("DLSSNR.Upscaling", 0u);
-			writer.SetUInt("DLSSNR.Hint.Render.Preset", 0u);
+			// Not set, measured as no-ops on 310.8 by other integrations (nr-port/NEXT.md item 1):
+			// Hint.Render.Preset (one weight set), Scale / ScalingRatio / Upscaling (a same-size
+			// transform), and the SDR / Hdr / AutoExposure / pre-exposure keys (read by no project).
 			const auto flags = static_cast<unsigned int>(
 				NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_DoSharpening | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure);
 			writer.SetUInt("Feature_Flags", flags);
 			writer.SetUInt("NVSDK_NGX_Parameter_Feature_Flags", flags);
-			writer.SetFloat("InPreExposure", 1.0f);
-			writer.SetFloat("InExposureScale", 1.0f);
-			writer.SetFloat("NVSDK_NGX_Parameter_PreExposure", 1.0f);
-			writer.SetFloat("NVSDK_NGX_Parameter_ExposureScale", 1.0f);
-			writer.SetUInt("DLSSNR.AutoExposure", 1u);
-			writer.SetUInt("DLSSNR.Hdr", 1u);
-			writer.SetUInt("DLSSNR.SDR", 0u);
 			WriteTuning(writer, tuning, protection);
-			writer.SetUInt("DLSSNR.UICorrection", 1u);
+			// UICorrection only acts with UIAlpha and Backbuffer bound; without them it is inert at best.
+			writer.SetUInt("DLSSNR.UICorrection", protection.alpha ? 1u : 0u);
 			NVSDK_NGX_Handle* handle = nullptr;
 			const auto result = GuardNgxCall(NVSDK_NGX_Result_Fail, [&] {
 				return state.create(commands, NVSDK_NGX_Feature_Reserved18, parameters, &handle);
@@ -541,7 +560,7 @@ namespace NR
 			frame.reset = true;
 		}
 		writer.SetResource("DLSSNR.Color", color);
-		writer.SetResource("DLSSNR.Depth", depth);
+		writer.SetResource("DLSSNR.Depth", guides.withoutDepth ? nullptr : depth);
 		writer.SetResource("DLSSNR.MVec", motion);
 		writer.SetResource("DLSSNR.Output", output);
 		for (auto key : { "DLSSNR.ColorSubrectBaseX", "DLSSNR.OutputSubrectBaseX" })
@@ -577,10 +596,8 @@ namespace NR
 		writer.SetUInt("DLSSNR.DepthInverted", guides.depthInverted ? 1u : 0u);
 		writer.SetUInt("DLSSNR.Enabled", 1u);
 		writer.SetUInt("DLSSNR.Reset", frame.reset ? 1u : 0u);
-		writer.SetUInt("DLSSNR.Upscaling", 0u);
-		writer.SetFloat("DLSSNR.Scale", 1.0f);
-		writer.SetFloat("DLSSNR.ScalingRatio", 1.0f);
 		WriteTuning(writer, tuning, protection);
+		writer.SetUInt("DLSSNR.UICorrection", protection.alpha ? 1u : 0u);
 		writer.SetFloat("Sharpness", 0.0f);
 		if (frame.feedCameraData) {
 			parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, frame.jitterX);
@@ -591,6 +608,8 @@ namespace NR
 		}
 		const auto result = GuardNgxCall(NVSDK_NGX_Result_Fail, [&] { return state.evaluate(commands, eye.feature.get(), parameters, nullptr); });
 		frame.result = static_cast<uint32_t>(result);
+		if (frame.created && !NVSDK_NGX_FAILED(result))
+			LogParameterReadBack(parameters, eyeIndex);
 		return !NVSDK_NGX_FAILED(result);
 	}
 }

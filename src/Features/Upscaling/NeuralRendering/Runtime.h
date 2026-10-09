@@ -185,6 +185,8 @@ namespace NR
 		float motionScaleX = 1.0f, motionScaleY = 1.0f;
 		/** @brief The depth guide is reverse-Z (1 is near), which Feature 18 must be told because it does not detect it. */
 		bool depthInverted = false;
+		/** @brief Test aid: binds no DLSSNR.Depth, to see whether 310.8 reads the depth guide at all. */
+		bool withoutDepth = false;
 	};
 
 	struct FrameParameters

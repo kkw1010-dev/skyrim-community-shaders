@@ -97,6 +97,8 @@ public:
 		uint32_t neuralRenderingTestCycleSeconds = 0;
 		// Test aid: the test cycle's NR turns alternate before upscaling and the final image.
 		bool neuralRenderingTestCyclePlacements = false;
+		// Test aid: the test cycle's NR turns step through run set 6's variants (skin structure, tone transfer, no depth).
+		bool neuralRenderingTestCycleVariants = false;
 	};
 
 	/** @brief The saved NR placement, clamped to a known one. */

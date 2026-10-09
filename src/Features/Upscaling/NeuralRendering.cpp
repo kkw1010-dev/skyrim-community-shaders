@@ -91,6 +91,28 @@ namespace
 	/** @brief Seconds into a test-cycle turn before its frame rates and GPU time are counted: a switch and NR's warm-up stay out. */
 	constexpr double kTestCycleSettleSeconds = 3.0;
 
+	/** @brief One run of the variant test cycle (run set 6): what it changes against the saved tuning. */
+	struct TestCycleVariant
+	{
+		const char* name;
+		float skinStructure;
+		uint32_t toneTransfer;
+		bool withoutDepth;
+	};
+	// Skin -1 is the shipped Auto, which runtime 310.8 treats as off; only 0.00-0.99 reach the image. The last
+	// run repeats aces-skin050 without depth, to see whether 310.8 reads the depth guide.
+	constexpr TestCycleVariant kTestCycleVariants[] = {
+		{ "gain-skinauto", -1.0f, NR::Tuning::kToneTransferGain, false },
+		{ "gain-skin000", 0.0f, NR::Tuning::kToneTransferGain, false },
+		{ "gain-skin050", 0.5f, NR::Tuning::kToneTransferGain, false },
+		{ "gain-skin090", 0.9f, NR::Tuning::kToneTransferGain, false },
+		{ "aces-skinauto", -1.0f, NR::Tuning::kToneTransferAces, false },
+		{ "aces-skin000", 0.0f, NR::Tuning::kToneTransferAces, false },
+		{ "aces-skin050", 0.5f, NR::Tuning::kToneTransferAces, false },
+		{ "aces-skin090", 0.9f, NR::Tuning::kToneTransferAces, false },
+		{ "aces-skin050-nodepth", 0.5f, NR::Tuning::kToneTransferAces, true },
+	};
+
 	/**
 	 * @brief Runtime feature slot the final-image placement evaluates in: the second eye's, which flat
 	 *        rendering never uses. Its own NGX feature keeps the output-resolution history apart.
@@ -326,7 +348,7 @@ struct NeuralRendering::Impl
 		float regionOutlineThickness = kRegionOutlineThicknessPixels;
 		uint32_t regionActorBaseX = 0, regionActorBaseY = 0, regionActorWidth = 0, regionActorHeight = 0;
 		float mix = 1.0f;  ///< Share of NR's edit applied (the mix slider); fills what was padding.
-		float mixPad = 0.0f;
+		uint32_t toneTransfer = NR::Tuning::kToneTransferGain;  ///< ColorTransferCS ToneTransfer; was padding.
 		// Per-category tone multipliers, Skin..Landscape in .x; the 16-byte rows mirror
 		// ColorTransferCS.hlsl's float4 CategoryStrength[5].
 		float4 categoryStrength[5]{};
@@ -399,6 +421,10 @@ struct NeuralRendering::Impl
 	uint32_t captureFrame = UINT32_MAX;
 	/** @brief Share of NR's result shown, 0 to 1: the user's mix, set before each frame. */
 	float mix = 1.0f;
+	/** @brief The before-upscaling pass's NR::Tuning::toneTransfer this frame. */
+	uint32_t toneTransfer = NR::Tuning::kToneTransferGain;
+	/** @brief Test aid (variant cycle): evaluate without DLSSNR.Depth. */
+	bool withoutDepth = false;
 	PassTimer passTimer{ "before upscaling" }, finalPassTimer{ "final image" };
 	/** @brief File-name stage of the running test capture: "test" before upscaling, "final" on the final image. */
 	const char* testStage = "test";
@@ -702,7 +728,8 @@ struct NeuralRendering::Impl
 	bool NeedsToneData() const
 	{
 		const bool showBands = visualMode == NR::Diagnostics::VisualMode::ToneLow || visualMode == NR::Diagnostics::VisualMode::ToneHigh;
-		const bool useTone = compositeMode == NR::Diagnostics::CompositeMode::Production || visualMode == NR::Diagnostics::VisualMode::ToneLowGain;
+		const bool useTone = (compositeMode == NR::Diagnostics::CompositeMode::Production && toneTransfer == NR::Tuning::kToneTransferGain) ||
+		                     visualMode == NR::Diagnostics::VisualMode::ToneLowGain;
 		return toneRadius > 0.01f && (showBands || (useTone && toneLowStrength != toneHighStrength));
 	}
 
@@ -764,6 +791,7 @@ struct NeuralRendering::Impl
 			data.visualMode = static_cast<uint32_t>(NR::Diagnostics::VisualMode::Mask);
 		data.manualExposure = manualExposure;
 		data.mix = mix;
+		data.toneTransfer = toneTransfer;
 		data.differenceStrength = differenceStrength;
 		data.splitPosition = splitPosition;
 		data.dynamicRangeProtect = float4{ shadowProtect, highlightProtect, 0.0f, 0.0f };
@@ -791,9 +819,10 @@ struct NeuralRendering::Impl
 		else if (debugOptions & NR::Diagnostics::BypassMask)
 			data.maskMode = static_cast<uint32_t>(NR::Diagnostics::MaskMode::ForceOne);
 		// The proxy is exposed by this frame's source (SelectExposure): Post Processing's auto exposure, the
-		// scene key, or none, which keeps Open Shaders' unit white point (hasExposure 0).
+		// scene key, or none, which keeps Open Shaders' unit white point (hasExposure 0). The ACES round trip
+		// divides the same exposure back out in the composite, so it binds it there too.
 		ID3D11ShaderResourceView* exposure = nullptr;
-		if (prepare && proxyExposure.adaptation) {
+		if ((prepare || toneTransfer == NR::Tuning::kToneTransferAces) && proxyExposure.adaptation) {
 			exposure = proxyExposure.adaptation;
 			data.hasExposure = 1;
 			data.exposureCompensation = proxyExposure.compensation;
@@ -1145,6 +1174,7 @@ struct NeuralRendering::Impl
 					guides.motionScaleX = useResolutionMotionScale ? static_cast<float>(width) : 1.0f;
 					guides.motionScaleY = useResolutionMotionScale ? static_cast<float>(height) : 1.0f;
 					guides.depthInverted = false;
+					guides.withoutDepth = withoutDepth;
 					const NR::ProtectionResources protection{
 						materialStrengthInFlight && eye.materialAlpha ? eye.materialAlpha->resource.get() : nullptr,
 						// A protected pixel is restored from the NR input itself, so the alpha and the
@@ -1377,10 +1407,11 @@ bool NeuralRendering::DialogueOpen()
 void NeuralRendering::SetupResources() { retryRequested = recreate = resetHistory = true; }
 void NeuralRendering::SetTestCapture(uint32_t a_frames) { testCaptureFrames.store(std::min(a_frames, kMaxTestCaptureFrames), std::memory_order_relaxed); }
 void NeuralRendering::SetUnitExposure(bool a_unit) { unitExposure.store(a_unit, std::memory_order_relaxed); }
-void NeuralRendering::SetTestCycle(uint32_t a_seconds, bool a_placements)
+void NeuralRendering::SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants)
 {
 	testCycleSeconds.store(a_seconds ? std::max(a_seconds, kMinTestCycleSeconds) : 0, std::memory_order_relaxed);
 	testCyclePlacements.store(a_placements, std::memory_order_relaxed);
+	testCycleVariants.store(a_variants, std::memory_order_relaxed);
 }
 
 const char* NeuralRendering::PlacementName(Placement a_placement)
@@ -1433,11 +1464,14 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	const auto seconds = testCycleSeconds.load(std::memory_order_relaxed);
 	if (!a_enabled || !seconds || !testCaptureFrames.load(std::memory_order_relaxed) || !globals::state->worldRenderedThisFrame)
 		return a_enabled;
-	const bool placements = testCyclePlacements.load(std::memory_order_relaxed);
+	const bool variants = testCycleVariants.load(std::memory_order_relaxed);
+	const bool placements = !variants && testCyclePlacements.load(std::memory_order_relaxed);
 	const auto now = std::chrono::steady_clock::now();
 	if (testCycleTurn == UINT32_MAX) {
 		testCycleStart = now;
-		if (placements)
+		if (variants)
+			logger::info("[NeuralRendering] test cycle: {} s turns of NR before upscaling through {} variants, each followed by a turn without NR", seconds, std::size(kTestCycleVariants));
+		else if (placements)
 			logger::info("[NeuralRendering] test cycle: {} s turns of NR before upscaling, none, NR on the final image, none", seconds);
 		else
 			logger::info("[NeuralRendering] test cycle: {} s with NR, {} s without, in turns", seconds, seconds);
@@ -1447,7 +1481,12 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	const bool run = turn % 2 == 0;
 	if (run && placements)
 		a_placement = turn % 4 == 0 ? Placement::kBeforeUpscaling : Placement::kFinalImage;
-	const char* name = !run ? "off" : placements ? PlacementName(a_placement) : "on";
+	testCycleVariant = -1;
+	if (run && variants) {
+		a_placement = Placement::kBeforeUpscaling;
+		testCycleVariant = static_cast<int32_t>((turn / 2) % std::size(kTestCycleVariants));
+	}
+	const char* name = !run ? "off" : testCycleVariant >= 0 ? kTestCycleVariants[testCycleVariant].name : placements ? PlacementName(a_placement) : "on";
 	if (turn != testCycleTurn) {
 		if (testCycleTurn != UINT32_MAX)
 			ReportTestCycleTurn(now);
@@ -1866,6 +1905,16 @@ void NeuralRendering::DrawSettings(bool& enabled, uint32_t& placement, float& mi
 	changed |= ImGui::SliderFloat(T(TKEY("skin_structure"), "Skin Structure Strength"), &tuning.skinStructureStrength, NR::Tuning::kAutomaticSkinStructure, NR::Tuning::kMaxStrength,
 		tuning.skinStructureStrength == NR::Tuning::kAutomaticSkinStructure ? T(TKEY("skin_auto"), "Auto") : "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	recreateTuning |= ImGui::IsItemDeactivatedAfterEdit();
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("skin_structure_tooltip"), "Runtime 310.8 changes the image only for 0.00 to 0.99; Auto (-1) and 1.00 leave skin as the other strengths make it."));
+	const char* transferLabels[] = { T(TKEY("tone_transfer_gain"), "Luminance gain"), T(TKEY("tone_transfer_aces"), "ACES round trip") };
+	int transfer = static_cast<int>(std::min(tuning.toneTransfer, NR::Tuning::kMaxToneTransfer));
+	if (ImGui::Combo(T(TKEY("tone_transfer"), "Tone Transfer (before upscaling)"), &transfer, transferLabels, IM_ARRAYSIZE(transferLabels))) {
+		tuning.toneTransfer = static_cast<uint32_t>(transfer);
+		changed = true;
+	}
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("tone_transfer_tooltip"), "Luminance gain applies only NR's bounded brightness change and keeps the game's colour.\nACES round trip gives NR an ACES-tonemapped copy and brings its colour back exactly, keeping the original in the highlights."));
 	// 05-29 writes no material category lane, so the controls that act only through it are hidden
 	// while it is missing and their saved values keep the neutral defaults.
 	const bool categoryLane = impl->MaterialLane() != nullptr;
@@ -2297,6 +2346,14 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, Placement placement, flo
 			boundedTuning.localStructureStrength = 0.0f;
 		if (diagnostic.options & NR::Diagnostics::DisableSkin)
 			boundedTuning.skinStructureStrength = NR::Tuning::kAutomaticSkinStructure;
+		work.withoutDepth = false;
+		if (testCycleVariant >= 0) {
+			const auto& variant = kTestCycleVariants[testCycleVariant];
+			boundedTuning.skinStructureStrength = variant.skinStructure;
+			boundedTuning.toneTransfer = variant.toneTransfer;
+			work.withoutDepth = variant.withoutDepth;
+		}
+		work.toneTransfer = boundedTuning.toneTransfer;
 		work.toneLowStrength = boundedTuning.localToneStrength;
 		work.toneHighStrength = boundedTuning.localStructureStrength;
 		work.categoryToneStrength = { boundedTuning.skinToneStrength, boundedTuning.hairToneStrength,

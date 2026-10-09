@@ -40,7 +40,7 @@ cbuffer ColorTransfer : register(b0)
 	uint RegionActorWidth;
 	uint RegionActorHeight;
 	float Mix;  // share of NR's edit applied, 0..1 (the user's mix slider)
-	float MixPad;
+	uint ToneTransfer;  // NR::Tuning: 0 bounded luminance gain, 1 ACES round trip
 	// Tone multiplier per category, Skin..Landscape in .x; 16-byte rows mirror the C++ struct.
 	float4 CategoryStrength[5];
 	uint MaterialMapEnabled;
@@ -217,6 +217,44 @@ float3 MakeDisplayProxy(float3 linearColor)
 	return ProxyLinearToSrgb(NeutwoEncode(linearColor));
 }
 
+static const uint kToneTransferAces = 1;
+
+// Narkowicz's ACES fit and its exact inverse, as DagorEngine's neural_rendering.dshl writes them, so a pixel
+// NR leaves alone comes back unchanged and any remaining change is the model's own edit.
+float3 AcesNarkowicz(float3 x)
+{
+	x = max(x, 0.0);
+	return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
+}
+
+float3 AcesNarkowiczInverse(float3 y)
+{
+	// The fit reaches 1.0 near x = 7.2; just below it the inverse stays finite.
+	y = clamp(y, 0.0, 0.9999);
+	const float3 a = 2.43 * y - 2.51;
+	const float3 b = 0.59 * y - 0.03;
+	const float3 c = 0.14 * y;
+	return (-b - sqrt(max(b * b - 4.0 * a * c, 0.0))) / (2.0 * a);
+}
+
+// The proxy's exposure: Prepare scales the scene by it before encoding, and the ACES composite divides it back out.
+float ProxyExposure()
+{
+	float exposure = ManualExposure;
+	if (ExposureMode == NR::kExposureIgnore || ExposureMode == NR::kExposureForceOne || ExposureMode == NR::kExposureDoNotPass)
+		exposure = 1.0;
+	if (HasExposure != 0 && (ExposureMode == NR::kExposureProduction || ExposureMode == NR::kExposureGame || ExposureMode == NR::kExposureDeExposeReExpose || ExposureMode == NR::kExposurePassOnly)) {
+		float average = Adaptation[0];
+		if (isfinite(average) && average > 0.0)
+			exposure *= SceneExposure::Evaluate(average, float2(ExposureMin, ExposureMax), ExposureCompensation);
+	}
+	if (ExposureMode == NR::kExposureDeExposeReExpose)
+		exposure = 1.0 / max(exposure, 1.0 / 65536.0);
+	else if (ExposureMode == NR::kExposureManual)
+		exposure = ManualExposure;
+	return isfinite(exposure) && exposure > 0.0 ? exposure : 1.0;
+}
+
 static const float kRegionFeatherDefault = 32.0;
 static const float kRegionFeatherMin = 16.0;
 static const float kRegionFeatherMax = 96.0;
@@ -285,21 +323,9 @@ float ToneLowAt(int2 pixel, float centerDelta)
 	if (id.x >= Width || id.y >= Height)
 		return;
 	float3 source = Original[id.xy + uint2(EyeOffsetX, 0)].rgb;
-	float exposure = ManualExposure;
-	if (ExposureMode == NR::kExposureIgnore || ExposureMode == NR::kExposureForceOne || ExposureMode == NR::kExposureDoNotPass)
-		exposure = 1.0;
-	if (HasExposure != 0 && (ExposureMode == NR::kExposureProduction || ExposureMode == NR::kExposureGame || ExposureMode == NR::kExposureDeExposeReExpose || ExposureMode == NR::kExposurePassOnly)) {
-		float average = Adaptation[0];
-		if (isfinite(average) && average > 0.0)
-			exposure *= SceneExposure::Evaluate(average, float2(ExposureMin, ExposureMax), ExposureCompensation);
-	}
-	if (ExposureMode == NR::kExposureDeExposeReExpose)
-		exposure = 1.0 / max(exposure, 1.0 / 65536.0);
-	else if (ExposureMode == NR::kExposureManual)
-		exposure = ManualExposure;
-	exposure = isfinite(exposure) && exposure > 0.0 ? exposure : 1.0;
-	// MakeDisplayProxy's saturate() bounds this to [0, 1] regardless of upstream NaN/Inf.
-	float3 proxy = MakeDisplayProxy(max(ToLinear(source), 0.0) * exposure);
+	const float3 exposed = max(ToLinear(source), 0.0) * ProxyExposure();
+	// Both encodings end in ProxyLinearToSrgb's saturate(): NR always gets sRGB-encoded 0..1, the range it expects.
+	float3 proxy = ToneTransfer == kToneTransferAces ? ProxyLinearToSrgb(AcesNarkowicz(exposed)) : MakeDisplayProxy(exposed);
 	Output[id.xy] = float4(proxy, 1.0);
 }
 
@@ -353,9 +379,20 @@ float ToneLowAt(int2 pixel, float centerDelta)
 	float protectionWeight = (1.0 - DynamicRangeProtect.x * (1.0 - shadowWeight)) *
 	                         (1.0 - DynamicRangeProtect.y * (1.0 - highlightWeight));
 	float3 result = originalLinear * ratio;
-	const bool boundedGain = CompositeMode == NR::kCompositeProduction;
+	const bool acesRoundTrip = CompositeMode == NR::kCompositeProduction && ToneTransfer == kToneTransferAces;
+	const bool boundedGain = CompositeMode == NR::kCompositeProduction && !acesRoundTrip;
 	if (boundedGain)
 		result = original.rgb * NR::CompositeGain(tone * saturate(protectionWeight) * saturate(Mix), NR::kMaxToneStops);
+	if (acesRoundTrip) {
+		// Inverse of Prepare's encode, then the original HDR wherever the pixel is bright and in the ACES
+		// shoulder, where the inverse cannot be trusted (remix / Dagor thresholds 1, 8, 0.75, 0.99).
+		const float proxyExposure = ProxyExposure();
+		const float3 exposed = originalLinear * proxyExposure;
+		const float3 decoded = AcesNarkowiczInverse(ProxySrgbToLinear(rawNeural)) / proxyExposure;
+		const float recovery = smoothstep(1.0, 8.0, Color::RGBToLuminance(exposed, Luma)) *
+		                       smoothstep(0.75, 0.99, Color::RGBToLuminance(AcesNarkowicz(exposed), Luma));
+		result = lerp(originalLinear, lerp(decoded, originalLinear, recovery), saturate(Mix) * FilteredCategoryStrength(int2(id.xy)));
+	}
 	if (CompositeMode == NR::kCompositeReplacement)
 		result = neuralLinear;
 	else if (CompositeMode == NR::kCompositeMaskedLerp)

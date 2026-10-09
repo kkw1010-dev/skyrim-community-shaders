@@ -16,6 +16,8 @@ namespace NR
 		static constexpr float kDefaultStrength = 1.0f, kAutomaticSkinStructure = -1.0f;
 		static constexpr uint32_t kMaxStyle = 2;
 		static constexpr uint32_t kRegionFitPadded = 0, kRegionFitTight = 1, kMaxRegionFit = kRegionFitTight;
+		/** @brief How the before-upscaling pass carries the scene to NR and back (ColorTransferCS ToneTransfer). */
+		static constexpr uint32_t kToneTransferGain = 0, kToneTransferAces = 1, kMaxToneTransfer = kToneTransferAces;
 		uint32_t style = 0;
 		float intensity = kDefaultStrength;
 		float localToneStrength = kDefaultStrength;
@@ -28,6 +30,12 @@ namespace NR
 		float foliageToneStrength = kDefaultStrength;
 		float landscapeToneStrength = kDefaultStrength;
 		bool useAutoMask = true;
+		/**
+		 * @brief kToneTransferGain: NR sees a soft-clipped proxy and only its bounded luminance change is
+		 *        applied. kToneTransferAces: an ACES (Narkowicz) + sRGB copy goes in, the exact inverse brings NR's
+		 *        colour back, and the original HDR is kept in the highlights (dxvk-remix / Dagor).
+		 */
+		uint32_t toneTransfer = kToneTransferGain;
 		/**
 		 * @brief Restricts NR's evaluation to a crop around the most prominent visible actor.
 		 *        Off by default: it trades full-frame NR quality for GPU time, and the
@@ -127,6 +135,7 @@ namespace NR
 		void Sanitize()
 		{
 			style = std::min(style, kMaxStyle);
+			toneTransfer = std::min(toneTransfer, kMaxToneTransfer);
 			regionFit = std::min(regionFit, kMaxRegionFit);
 			for (auto* strength : { &intensity, &localToneStrength, &localStructureStrength,
 					 &skinToneStrength, &hairToneStrength, &eyeToneStrength, &foliageToneStrength, &landscapeToneStrength })
