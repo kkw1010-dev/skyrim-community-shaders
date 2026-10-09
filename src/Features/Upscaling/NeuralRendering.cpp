@@ -1,5 +1,6 @@
 #include "NeuralRendering.h"
 
+#include "Features/PostProcessing.h"
 #include "Features/Upscaling.h"
 #include "Globals.h"
 #include "GpuPass.h"
@@ -79,6 +80,27 @@ namespace
 
 	/** @brief Most consecutive frames one test capture holds; each frame keeps two render-size copies. */
 	constexpr uint32_t kMaxTestCaptureFrames = 8;
+
+	/** @brief Side of the square pixel tile one SceneKeyCS Reduce group covers. */
+	constexpr uint32_t kSceneKeyTilePixels = 64;
+	/** @brief Most tiles the scene-key reduction holds: 16.7 megapixels per eye. */
+	constexpr uint32_t kMaxSceneKeyTiles = 4096;
+	/** @brief How fast the scene key follows the frame, as Post Processing's default AdaptSpeed. */
+	constexpr float kSceneKeyAdaptSpeed = 1.5f;
+	/** @brief Range the scene key is clamped to before 0.18 / key exposes the proxy: 2^-24 to 2^8. */
+	constexpr float kSceneKeyMinimum = 5.9604645e-8f, kSceneKeyMaximum = 256.0f;
+	/** @brief NR frames between two scene-key log lines. */
+	constexpr uint32_t kSceneKeyReportFrames = 600;
+
+	/** @brief Post Processing's histogram auto exposure while it runs, else nullptr. */
+	HistogramAutoExposure* PostProcessingAutoExposure()
+	{
+		auto& postProcessing = globals::features::postProcessing;
+		if (!postProcessing.loaded || postProcessing.bypass)
+			return nullptr;
+		auto* autoExposure = postProcessing.GetPipelineFeature<HistogramAutoExposure>(PostProcessing::FeaturePipelineIndex::AutoExposure);
+		return autoExposure && autoExposure->enabled && autoExposure->GetAdaptationSRV() ? autoExposure : nullptr;
+	}
 
 	/**
 	 * @brief GPU time of the NR pass from D3D11 timestamps: the encoder, the D3D12 evaluate the
@@ -303,6 +325,40 @@ struct NeuralRendering::Impl
 	std::vector<TestFrame> testFrames;
 	/** @brief Frames of the running test capture already copied; the files are written once all are in. */
 	uint32_t testFramesCopied = 0;
+
+	/** @brief Where this frame's proxy exposure comes from; logged when it changes. */
+	enum class ExposureSource : uint8_t
+	{
+		kUnit,            ///< None: Open Shaders' unit white point (stage 1, or the test setting).
+		kPostProcessing,  ///< Post Processing's histogram auto exposure, as its composite applies it.
+		kSceneKey         ///< NR's own adapted scene key (SceneKeyCS), when Post Processing has none.
+	};
+	/** @brief The adapted luminance and constants the Prepare pass exposes the proxy with; no SRV keeps unit exposure. */
+	struct ProxyExposure
+	{
+		ID3D11ShaderResourceView* adaptation = nullptr;
+		float compensation = 1.0f, minimum = 1.0f, maximum = 1.0f;
+	} proxyExposure;
+	/** @brief Set from the settings before each frame: the stage-1 unit white point, for comparisons. */
+	bool unitExposure = false;
+	ExposureSource exposureSource = ExposureSource::kUnit;
+	bool exposureSourceLogged = false;
+	/** @brief SceneKeyCS cbuffer: the eye extent, the tile grid and this frame's adaptation step. */
+	struct alignas(16) SceneKeyData
+	{
+		uint32_t width, height, eyeOffsetX, tileCount;
+		uint32_t tilesX;
+		float adaptLerp;
+		float2 pad{};
+	};
+	static_assert(sizeof(SceneKeyData) == 32);
+	Util::LazyShader<ID3D11ComputeShader> sceneKeyReduce, sceneKeyAdapt;
+	std::unique_ptr<ConstantBuffer> sceneKeyBuffer;
+	std::unique_ptr<StructuredBuffer> sceneKeyTiles, sceneKeyAdaptation;
+	/** @brief Reads the adapted key back for the log without a stall: copied at one report, mapped at the next. */
+	winrt::com_ptr<ID3D11Buffer> sceneKeyStaging;
+	bool sceneKeyStagingPending = false;
+	uint32_t sceneKeyFrames = 0;
 
 	~Impl()
 	{
@@ -589,9 +645,16 @@ struct NeuralRendering::Impl
 			data.maskMode = static_cast<uint32_t>(NR::Diagnostics::MaskMode::ForceOne);
 		else if (debugOptions & NR::Diagnostics::BypassMask)
 			data.maskMode = static_cast<uint32_t>(NR::Diagnostics::MaskMode::ForceOne);
+		// The proxy is exposed by this frame's source (SelectExposure): Post Processing's auto exposure, the
+		// scene key, or none, which keeps Open Shaders' unit white point (hasExposure 0).
 		ID3D11ShaderResourceView* exposure = nullptr;
-		// Stage 1: 05-29's Post Processing does not publish a scene-exposure contract, so the proxy uses
-		// Open Shaders' documented fallback of a unit white point (hasExposure stays 0).
+		if (prepare && proxyExposure.adaptation) {
+			exposure = proxyExposure.adaptation;
+			data.hasExposure = 1;
+			data.exposureCompensation = proxyExposure.compensation;
+			data.exposureMin = proxyExposure.minimum;
+			data.exposureMax = proxyExposure.maximum;
+		}
 		colorBuffer->Update(data);
 		auto buffer = colorBuffer->CB();
 		context->CSSetConstantBuffers(0, 1, &buffer);
@@ -702,6 +765,105 @@ struct NeuralRendering::Impl
 	/** @brief True once every frame of the running test capture has been copied. */
 	bool TestCaptureComplete() const { return !testFrames.empty() && testFramesCopied == testFrames.size(); }
 
+	/**
+	 * @brief Measures the first eye's scene key from the original copy and eases the adapted key toward it,
+	 *        the way Post Processing's histogram auto exposure adapts. Runs once per frame, before Prepare.
+	 * @return The adaptation buffer Prepare reads, or nullptr when the pass is unavailable.
+	 */
+	ID3D11ShaderResourceView* UpdateSceneKey()
+	{
+		const uint32_t tilesX = (width + kSceneKeyTilePixels - 1) / kSceneKeyTilePixels;
+		const uint32_t tilesY = (height + kSceneKeyTilePixels - 1) / kSceneKeyTilePixels;
+		if (!original || !tilesX || !tilesY || tilesX * tilesY > kMaxSceneKeyTiles)
+			return nullptr;
+		if (!sceneKeyAdaptation) {
+			sceneKeyBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SceneKeyData>(), "NeuralRendering::SceneKey CB");
+			sceneKeyTiles = std::make_unique<StructuredBuffer>(StructuredBufferDesc<float2>(kMaxSceneKeyTiles, false), kMaxSceneKeyTiles, "NeuralRendering::SceneKey Tiles");
+			sceneKeyTiles->CreateUAV();
+			sceneKeyAdaptation = std::make_unique<StructuredBuffer>(StructuredBufferDesc<float>(1u, false), 1, "NeuralRendering::SceneKey Adaptation");
+			sceneKeyAdaptation->CreateSRV();
+			sceneKeyAdaptation->CreateUAV();
+		}
+		auto* reduce = sceneKeyReduce.Get(L"Data/Shaders/Upscaling/NeuralRendering/SceneKeyCS.hlsl", {}, "cs_5_0", "Reduce", "NeuralRendering::SceneKeyReduce CS");
+		auto* adapt = sceneKeyAdapt.Get(L"Data/Shaders/Upscaling/NeuralRendering/SceneKeyCS.hlsl", {}, "cs_5_0", "Adapt", "NeuralRendering::SceneKeyAdapt CS");
+		if (!reduce || !adapt)
+			return nullptr;
+		CS_GPU_PASS("Upscaling::NRSceneKey");
+		const float realDelta = RE::BSTimer::GetSingleton()->realTimeDelta;
+		const SceneKeyData data{ width, height, 0, tilesX * tilesY, tilesX, std::clamp(1.0f - std::exp(-realDelta * kSceneKeyAdaptSpeed), 0.0f, 1.0f) };
+		sceneKeyBuffer->Update(data);
+		context->ClearState();
+		auto* buffer = sceneKeyBuffer->CB();
+		context->CSSetConstantBuffers(0, 1, &buffer);
+		auto* source = original->srv.get();
+		context->CSSetShaderResources(0, 1, &source);
+		ID3D11UnorderedAccessView* outputs[]{ sceneKeyTiles->UAV(0), sceneKeyAdaptation->UAV(0) };
+		context->CSSetUnorderedAccessViews(0, ARRAYSIZE(outputs), outputs, nullptr);
+		context->CSSetShader(reduce, nullptr, 0);
+		context->Dispatch(tilesX, tilesY, 1);
+		context->CSSetShader(adapt, nullptr, 0);
+		context->Dispatch(1, 1, 1);
+		context->ClearState();
+		ReportSceneKey();
+		return sceneKeyAdaptation->SRV(0);
+	}
+
+	/** @brief Logs the adapted key and the exposure it gives every kSceneKeyReportFrames, without waiting on the GPU. */
+	void ReportSceneKey()
+	{
+		if (++sceneKeyFrames < kSceneKeyReportFrames)
+			return;
+		sceneKeyFrames = 0;
+		if (!sceneKeyStaging) {
+			D3D11_BUFFER_DESC desc{};
+			desc.ByteWidth = sizeof(float);
+			desc.Usage = D3D11_USAGE_STAGING;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+			desc.StructureByteStride = sizeof(float);
+			if (FAILED(globals::d3d::device->CreateBuffer(&desc, nullptr, sceneKeyStaging.put())))
+				return;
+			Util::SetResourceName(sceneKeyStaging.get(), "NeuralRendering::SceneKey Readback");
+		}
+		D3D11_MAPPED_SUBRESOURCE mapped{};
+		if (sceneKeyStagingPending && SUCCEEDED(context->Map(sceneKeyStaging.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) {
+			const float key = *static_cast<const float*>(mapped.pData);
+			context->Unmap(sceneKeyStaging.get(), 0);
+			logger::info("[NeuralRendering] scene key {:.6f}: proxy exposure x{:.1f}", key, 0.18f / std::clamp(key, kSceneKeyMinimum, kSceneKeyMaximum));
+		}
+		winrt::com_ptr<ID3D11Resource> adaptation;
+		sceneKeyAdaptation->SRV(0)->GetResource(adaptation.put());
+		context->CopyResource(sceneKeyStaging.get(), adaptation.get());
+		sceneKeyStagingPending = true;
+	}
+
+	/**
+	 * @brief Picks this frame's proxy exposure: Post Processing's auto exposure while it runs, else the
+	 *        scene key, else none. Runs after the original copy, which the scene key reads.
+	 */
+	void SelectExposure()
+	{
+		proxyExposure = {};
+		auto source = ExposureSource::kUnit;
+		if (!unitExposure) {
+			if (auto* autoExposure = PostProcessingAutoExposure()) {
+				// The same constants Post Processing's composite applies: 0.18 * 2^EV / clamp(adapted, 2^range).
+				proxyExposure = { autoExposure->GetAdaptationSRV(), std::exp2(autoExposure->settings.ExposureCompensation),
+					std::exp2(autoExposure->settings.AdaptationRange.x), std::exp2(autoExposure->settings.AdaptationRange.y) };
+				source = ExposureSource::kPostProcessing;
+			} else if (auto* key = UpdateSceneKey()) {
+				proxyExposure = { key, 1.0f, kSceneKeyMinimum, kSceneKeyMaximum };
+				source = ExposureSource::kSceneKey;
+			}
+		}
+		if (!exposureSourceLogged || source != exposureSource) {
+			static constexpr std::array<const char*, 3> kSourceNames{ "unit white point", "Post Processing auto exposure", "scene key" };
+			logger::info("[NeuralRendering] proxy exposure: {}", kSourceNames[static_cast<size_t>(source)]);
+			exposureSource = source;
+			exposureSourceLogged = true;
+		}
+	}
+
 	/** @brief Writes the finished test capture as lossless DDS through the diagnostics writer, then frees the copies. */
 	void WriteTestCapture(NR::Diagnostics& diagnostics)
 	{
@@ -737,6 +899,7 @@ struct NeuralRendering::Impl
 		} scope(context.get(), isolated.get());
 		const D3D11_BOX originalBox{ 0, 0, 0, width * eyeCount, height, 1 };
 		context->CopySubresourceRegion(original->resource.get(), 0, 0, 0, 0, color, 0, &originalBox);
+		SelectExposure();
 		const bool capture = diagnostics.BeginCapture(diagnostic.number);
 		if (capture)
 			diagnostics.DumpTexture("00_original_scene", original->resource.get(), diagnostic.number);
@@ -991,6 +1154,7 @@ bool NeuralRendering::DialogueOpen()
 
 void NeuralRendering::SetupResources() { retryRequested = recreate = resetHistory = true; }
 void NeuralRendering::SetTestCapture(uint32_t a_frames) { testCaptureFrames.store(std::min(a_frames, kMaxTestCaptureFrames), std::memory_order_relaxed); }
+void NeuralRendering::SetUnitExposure(bool a_unit) { unitExposure.store(a_unit, std::memory_order_relaxed); }
 void NeuralRendering::ResetHistory() { resetHistory = true; }
 void NeuralRendering::ClearShaderCache() { retryRequested = clearShaders = resetHistory = true; }
 
@@ -1630,6 +1794,8 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 			work.prepareToneData.Reset();
 			work.compositeColor.Reset();
 			work.materialAlphaShader.Reset();
+			work.sceneKeyReduce.Reset();
+			work.sceneKeyAdapt.Reset();
 		}
 		auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 		auto* color = Util::AsReal(targets[RE::RENDER_TARGETS::kMAIN].texture);
@@ -1744,6 +1910,7 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 			else
 				logger::warn("[NeuralRendering] test capture skipped: its copy textures could not be created");
 		}
+		work.unitExposure = unitExposure.load(std::memory_order_relaxed);
 		bool processed = false;
 		{
 			const PassTimer::Scope timing(work.passTimer);

@@ -86,6 +86,8 @@ public:
 		NR::Tuning neuralRenderingTuning;
 		// Test aid: frames of the once-per-session before/after NR capture (0 = off, at most 8).
 		uint32_t neuralRenderingTestCaptureFrames = 0;
+		// Test aid: true keeps stage 1's unit white point for the NR proxy instead of the scene exposure.
+		bool neuralRenderingUnitExposure = false;
 	};
 
 	Settings settings;

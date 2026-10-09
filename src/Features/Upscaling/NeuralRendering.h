@@ -134,6 +134,11 @@ struct NeuralRendering
 	 *        CommunityShaders\Captures. Zero, the default, turns it off.
 	 */
 	void SetTestCapture(uint32_t a_frames);
+	/**
+	 * @brief Test aid: true keeps stage 1's unit white point instead of exposing NR's proxy by Post
+	 *        Processing's auto exposure or the scene key, so the two can be compared.
+	 */
+	void SetUnitExposure(bool a_unit);
 
 private:
 	struct Impl;
@@ -155,6 +160,8 @@ private:
 	std::atomic<uint32_t> testCaptureFrames{ 0 };
 	/** @brief The session's test capture has started; it runs once per session. */
 	bool testCaptureStarted = false;
+	/** @brief Mirror of the unit-exposure test setting for the rendering thread. */
+	std::atomic_bool unitExposure = false;
 	mutable std::mutex statusMutex;
 	/** @brief True while the region-of-interest toggle is on and NR is enabled; the hook's off switch. */
 	std::atomic_bool regionEnabled = false;
