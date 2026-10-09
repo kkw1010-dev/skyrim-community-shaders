@@ -16,8 +16,6 @@ namespace NR
 		static constexpr float kDefaultStrength = 1.0f, kAutomaticSkinStructure = -1.0f;
 		/** @brief Local tone and structure: runtime 310.8 reads them up to 1 (others measured the cap). */
 		static constexpr float kMaxLocalStrength = 1.0f;
-		/** @brief The user's play default for skin structure (10-09); 310.8 reads only 0.00-0.99. */
-		static constexpr float kDefaultSkinStructure = 0.5f;
 		/** @brief The share of NR's edit: above 1 extrapolates it (orig + mix * (NR - orig)). */
 		static constexpr float kMaxMix = 2.0f;
 		static constexpr uint32_t kMaxStyle = 2;
@@ -30,7 +28,7 @@ namespace NR
 		float intensity = kDefaultStrength;
 		float localToneStrength = kDefaultStrength;
 		float localStructureStrength = kDefaultStrength;
-		float skinStructureStrength = kDefaultSkinStructure;
+		float skinStructureStrength = kAutomaticSkinStructure;  // the user's choice (10-09, run set 7 t18)
 		/** @brief Per-category multipliers on the composited tone edit, from the deferred Masks2 category. */
 		float skinToneStrength = kDefaultStrength;
 		float hairToneStrength = kDefaultStrength;
@@ -49,7 +47,7 @@ namespace NR
 		 *        the model runs on a downscaled copy and only its edit is upscaled onto the full frame
 		 *        (base + up(NR(low)) - up(low)); its cost falls with the pixel count (0.75 = 56 %).
 		 */
-		float finalScale = 0.75f;  // run set 7: same look as 1.0, 69 instead of 55 real fps
+		float finalScale = kMaxFinalScale;  // the user's choice (10-09): full size, 55 real fps with MFG 3x
 		/**
 		 * @brief Restricts NR's evaluation to a crop around the most prominent visible actor.
 		 *        Off by default: it trades full-frame NR quality for GPU time, and the
