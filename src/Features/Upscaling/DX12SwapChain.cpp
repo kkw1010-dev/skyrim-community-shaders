@@ -358,9 +358,14 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 	DX::ThrowIfFailed(d3d11Context->Signal(interopFence.fence11.get(), d3d11SignalValue));
 	DX::ThrowIfFailed(commandQueue->Wait(interopFence.fence12.get(), d3d11SignalValue));
 
-	// New frame, reset
-	if (frameFenceValues[frameIndex])
-		DX::ThrowIfFailed(interopFence.fence12->SetEventOnCompletion(frameFenceValues[frameIndex], nullptr));
+	// New frame, reset. The slot's previous frame must be off the GPU before its allocator is reused; an
+	// unbounded wait here froze the game without a TDR (F001), so a stuck queue now skips the frame instead.
+	if (!WaitForFrameSlot()) {
+		const float clearColor[4]{};
+		d3d11Context->ClearRenderTargetView(uiBufferWrapped->rtv, clearColor);
+		upscaling.frameGenerationPrepared = false;
+		return S_OK;
+	}
 	DX::ThrowIfFailed(commandAllocators[frameIndex]->Reset());
 	DX::ThrowIfFailed(commandLists[frameIndex]->Reset(commandAllocators[frameIndex].get(), nullptr));
 
@@ -408,12 +413,13 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 										 nullptr,
 				dlssgUIComposed ? uiBufferWrapped->resource.get() : nullptr,
 				swapChainDesc.Width, swapChainDesc.Height);
-			streamlineDX12.ConfigureDLSSG(upscaling.ShouldUseFrameGenerationThisFrame(), dlssgUIComposed);
+			// A stall earlier in this Present may have started the hold after this frame was prepared.
+			streamlineDX12.ConfigureDLSSG(upscaling.ShouldUseFrameGenerationThisFrame() && !upscaling.FrameGenerationHeld(), dlssgUIComposed);
 		} else {
 			streamlineDX12.ConfigureDLSSG(false, false);
 		}
 	} else {
-		upscaling.fidelityFX.Present(upscaling.ShouldUseFrameGenerationThisFrame(), isHDR);
+		upscaling.fidelityFX.Present(upscaling.ShouldUseFrameGenerationThisFrame() && !upscaling.FrameGenerationHeld(), isHDR);
 	}
 
 	DX::ThrowIfFailed(commandLists[frameIndex]->Close());
@@ -463,6 +469,40 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 	upscaling.frameGenerationPrepared = false;
 
 	return S_OK;
+}
+
+bool DX12SwapChain::WaitForFrameSlot()
+{
+	const uint64_t value = frameFenceValues[frameIndex];
+	if (!value)
+		return true;
+	auto& upscaling = globals::features::upscaling;
+	const auto completed = [this] { return interopFence.fence12 ? interopFence.fence12->GetCompletedValue() : 0; };
+	// Once frames are being skipped, each Present only looks briefly, so the main thread keeps running.
+	auto outcome = interopFence.CpuWaitOutcome(value, skippedFrames ? kFrameSlotRetryMs : kFrameSlotWaitMs);
+	if (outcome == SharedFence::WaitOutcome::kTimeout && !skippedFrames) {
+		// DLSS-G's present queue is the likeliest thing holding the frame: switch it off, keep it off, wait once more.
+		logger::warn("[DX12SwapChain] Back buffer slot {} not finished after {} ms (fence {}, completed {}); frame generation off for {} s",
+			frameIndex, kFrameSlotWaitMs, value, completed(), kStallFrameGenerationHold.count() / 1000.0);
+		if (useDLSSG)
+			upscaling.streamlineDX12.ConfigureDLSSG(false, false);
+		upscaling.HoldFrameGeneration(kStallFrameGenerationHold, "a frame the GPU did not finish");
+		outcome = interopFence.CpuWaitOutcome(value, kFrameSlotRecoveryMs);
+		if (outcome == SharedFence::WaitOutcome::kComplete)
+			logger::info("[DX12SwapChain] Back buffer slot {} finished within {} ms more", frameIndex, kFrameSlotRecoveryMs);
+	}
+	if (outcome == SharedFence::WaitOutcome::kComplete) {
+		if (skippedFrames) {
+			logger::info("[DX12SwapChain] Back buffer slot {} finished; presenting again after {} skipped frames", frameIndex, skippedFrames);
+			skippedFrames = 0;
+		}
+		return true;
+	}
+	if (++skippedFrames == 1 || skippedFrames % 60 == 0)
+		logger::error("[DX12SwapChain] Back buffer slot {} still not finished (fence {}, completed {}, wait {}); {} frame(s) skipped",
+			frameIndex, value, completed(), outcome == SharedFence::WaitOutcome::kTimeout ? "timed out" : "failed", skippedFrames);
+	upscaling.HoldFrameGeneration(kStallFrameGenerationHold, "a frame the GPU did not finish");
+	return false;
 }
 
 bool DX12SwapChain::CanComposeDLSSGFrame()

@@ -6,6 +6,7 @@
 #include <wrl\client.h>
 #include <wrl\wrappers\corewrappers.h>
 
+#include <chrono>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <string>
@@ -139,6 +140,24 @@ public:
 	UINT frameIndex = 0;
 
 	UINT64 frameFenceValues[kMaxBackBuffers] = {};
+
+	/** @brief First wait for a back buffer slot's previous frame; a normal frame finishes in a few milliseconds. */
+	static constexpr DWORD kFrameSlotWaitMs = 1000;
+	/** @brief Second wait, after DLSS-G was switched off to release whatever holds the queue. */
+	static constexpr DWORD kFrameSlotRecoveryMs = 4000;
+	/** @brief Wait per Present while frames are being skipped, so the main thread keeps running. */
+	static constexpr DWORD kFrameSlotRetryMs = 100;
+	/** @brief How long frame generation stays off after a stalled frame. */
+	static constexpr std::chrono::milliseconds kStallFrameGenerationHold{ 3000 };
+	/** @brief Presents skipped in a row because the slot's previous frame was still on the GPU. */
+	uint32_t skippedFrames = 0;
+	/**
+	 * @brief Waits, bounded, until the current slot's previous frame is off the GPU, so its allocator can be reused.
+	 *        A slow first wait switches DLSS-G off and holds it, then waits once more; if the GPU still has not
+	 *        finished, the frame is skipped with a logged error instead of blocking the main thread forever.
+	 * @return False when this frame must be skipped.
+	 */
+	bool WaitForFrameSlot();
 
 	LARGE_INTEGER qpf;
 

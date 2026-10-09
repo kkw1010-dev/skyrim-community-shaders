@@ -6,6 +6,7 @@
 #include "Upscaling/RCAS/RCAS.h"
 #include "Upscaling/NeuralRendering.h"
 #include "Upscaling/Streamline.h"
+#include <chrono>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <winrt/base.h>
@@ -138,8 +139,32 @@ public:
 	// FG FPS Measurement for Overlay
 	bool IsFrameGenerationDx12PathActive() const;
 	bool IsFrameGenerationActive() const;
-	/** @brief Returns whether settings and menu state permit preparing frame-generation inputs. */
+	/** @brief Returns whether settings and menu state permit frame generation, before any hold. */
+	bool FrameGenerationPermitted() const;
+	/** @brief Returns whether settings and menu state permit preparing frame-generation inputs and no hold keeps it off. */
 	bool ShouldPrepareFrameGeneration() const;
+	/**
+	 * @brief Keeps frame generation off for at least a_duration and kFrameGenerationHoldFrames post-processed frames
+	 *        from now, so DLSS-G never comes back in the same frame as the Reflex markers it needs (F001).
+	 * @param a_reason Logged when the hold starts; nullptr for the per-frame menu hold, which would flood the log.
+	 */
+	void HoldFrameGeneration(std::chrono::milliseconds a_duration, const char* a_reason);
+	/** @brief True while a hold keeps frame generation off. */
+	bool FrameGenerationHeld() const;
+	/** @brief Once per frame, before frame generation is prepared: holds it after a loading screen and while a menu blocks it. */
+	void UpdateFrameGenerationHold();
+	/** @brief Shortest hold after a loading screen or a menu, in time and in frames: both must pass. */
+	static constexpr std::chrono::milliseconds kFrameGenerationHold{ 1000 };
+	static constexpr uint32_t kFrameGenerationHoldFrames = 30;
+	/** @brief A gap this long between two post-processed frames is a loading screen (or a long hitch). */
+	static constexpr std::chrono::milliseconds kFrameGenerationLoadingGap{ 250 };
+	/** @brief The hold lasts until this time and until frameGenerationHoldFrames more frames have been post-processed. */
+	std::chrono::steady_clock::time_point frameGenerationHoldUntil{};
+	uint32_t frameGenerationHoldFrames = 0;
+	/** @brief When post-processing last ran, to see a loading screen as a gap. */
+	std::chrono::steady_clock::time_point lastPostProcessingTime{};
+	/** @brief Engine frame UpdateFrameGenerationHold last ran in. */
+	uint32_t frameGenerationHoldUpdatedFrame = UINT32_MAX;
 	/** @brief Returns the prepared frame's generation decision until its buffers are cleared after Present. */
 	bool ShouldUseFrameGenerationThisFrame() const;
 	bool IsUpscalingActive() const;
