@@ -223,7 +223,13 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 
 	if (upscaling.IsBackendInitialized()) {
 		upscaling.UpgradeBackendInterface((void**)&(*ppDevice));
-		upscaling.UpgradeBackendInterface((void**)&(*ppSwapChain));
+		// DLSS upscaling does not need Streamline's Present; the frame-generation path never
+		// wraps it either. Only Reflex needs the present markers it emits there (F002: every
+		// GPU fault came from runs where this wrapper was the one new piece on the Present path).
+		if (globals::game::isVR || upscaling.settings.reflexLowLatencyMode)
+			upscaling.UpgradeBackendInterface((void**)&(*ppSwapChain));
+		else
+			logger::info("[Streamline DX11] Swap chain left unwrapped: Reflex is off (turning Reflex on needs a restart)");
 		upscaling.SetBackendD3DDevice(*ppDevice);
 		// Re-check after device bind to ensure feature availability is accurate.
 		upscaling.CheckBackendFeatures(pAdapter);
@@ -1783,11 +1789,17 @@ void Upscaling::LoadUpscalingSDKs()
 	// This ensures all SDKs are available before any D3D device creation
 	streamline.LoadInterposer();  // DX11: DLSS + Reflex + PCL
 
-	streamlineDX12.renderAPI = sl::RenderAPI::eD3D12;
-	streamlineDX12.pluginDir = L"Data\\Shaders\\Upscaling\\StreamlineDX12";
-	streamlineDX12.interposerDllName = L"sl.interposer.dll";
-	streamlineDX12.instanceTag = "DX12";
-	streamlineDX12.LoadInterposer();
+	// The DX12 instance serves only DLSS-G, which needs frame generation at boot; without it the
+	// instance would load sl.dlss_g and nvngx_dlssg with no device to run on (F002).
+	if (settings.frameGenerationMode && !globals::game::isVR) {
+		streamlineDX12.renderAPI = sl::RenderAPI::eD3D12;
+		streamlineDX12.pluginDir = L"Data\\Shaders\\Upscaling\\StreamlineDX12";
+		streamlineDX12.interposerDllName = L"sl.interposer.dll";
+		streamlineDX12.instanceTag = "DX12";
+		streamlineDX12.LoadInterposer();
+	} else {
+		logger::info("[Streamline DX12] Not loaded: frame generation is off");
+	}
 
 	fidelityFX.LoadFFX();  // AMD FSR frame generation
 }
