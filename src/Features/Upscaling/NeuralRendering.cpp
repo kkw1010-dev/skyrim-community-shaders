@@ -1418,8 +1418,14 @@ void NeuralRendering::ReportTestCycleTurn(std::chrono::steady_clock::time_point 
 	const auto& timer = finalTimes.samples ? finalTimes : beforeTimes;
 	const std::string gpu = timer.samples ? std::format("NR GPU avg {:.3f} ms (min {:.3f}, max {:.3f}) over {} frames", timer.sumMs / timer.samples, timer.minMs, timer.maxMs, timer.samples) :
 	                                        std::string("no NR GPU time");
-	logger::info("[NeuralRendering] test cycle: turn {} ({}) over {:.1f} s: real {:.1f} fps, output {:.1f} fps ({:.2f} presented per frame), {}",
-		testCycleTurn, testCycleTurnName, seconds, realFps, outputFps, testCycleWindowPresented ? static_cast<double>(testCycleWindowPresented) / testCycleWindowFrames : 1.0, gpu);
+	// Reflex's GPU frame interval is the cross-check: it should match 1000 / real fps.
+	const std::string latency = testCycleLatencyReports ?
+	                                std::format("Reflex PC latency {:.1f} ms, GPU frame {:.2f} ms over {} reports", testCycleLatencyMs / testCycleLatencyReports,
+										testCycleGpuFrameMs / testCycleLatencyReports, testCycleLatencyReports) :
+	                                std::string("no Reflex latency");
+	logger::info("[NeuralRendering] test cycle: turn {} ({}) over {:.1f} s: real {:.1f} fps, output {:.1f} fps ({:.2f} presented per frame), {}, {}",
+		testCycleTurn, testCycleTurnName, seconds, realFps, outputFps, testCycleWindowPresented ? static_cast<double>(testCycleWindowPresented) / testCycleWindowFrames : 1.0, gpu,
+		latency);
 }
 
 bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
@@ -1450,6 +1456,8 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 		testCycleDumpRequested = false;
 		testCycleWindowFrames = 0;
 		testCycleWindowPresented = 0;
+		testCycleLatencyMs = testCycleGpuFrameMs = 0.0;
+		testCycleLatencyReports = 0;
 		logger::info("[NeuralRendering] test cycle: turn {}, NR {}", turn, name);
 	}
 	// Counted from kTestCycleSettleSeconds in, so a placement switch and NR's warm-up stay out of the numbers.
@@ -1469,6 +1477,13 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 			auto& upscaling = globals::features::upscaling;
 			if (upscaling.UsesDLSSGFrameGen() && upscaling.IsFrameGenerationActive())
 				testCycleWindowPresented += upscaling.streamlineDX12.lastDLSSGFramesPresented;
+			// Reflex keeps the last 64 frames' reports, so a sample every 60 frames covers the window without gaps.
+			Streamline::ReflexLatency latency;
+			if (testCycleWindowFrames % 60 == 0 && upscaling.UsesDLSSGFrameGen() && upscaling.streamlineDX12.SampleReflexLatency(latency)) {
+				testCycleLatencyMs += latency.pcLatencyMs * latency.frames;
+				testCycleGpuFrameMs += latency.gpuFrameMs * latency.frames;
+				testCycleLatencyReports += latency.frames;
+			}
 		}
 	}
 	// The turn's last 1.5 s: NR's history, or its absence, has settled by then.

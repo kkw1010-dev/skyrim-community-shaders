@@ -220,6 +220,9 @@ private:
 	bool testCycleWindowOpen = false;
 	/** @brief Engine frame last counted, so a second post-processing call in one frame is not counted twice. */
 	uint32_t testCycleCountedFrame = UINT32_MAX;
+	/** @brief Reflex's PC latency and GPU frame interval over the turn's window, summed over its frame reports. */
+	double testCycleLatencyMs = 0.0, testCycleGpuFrameMs = 0.0;
+	uint32_t testCycleLatencyReports = 0;
 	/** @brief Logs the running turn's frame rates and NR GPU time, then starts the next turn's counts. */
 	void ReportTestCycleTurn(std::chrono::steady_clock::time_point a_now);
 	/**

@@ -162,6 +162,19 @@ public:
 	 * index is how DLSS-G's pacer matches presents to constants -- structural for FG.
 	 */
 	void EmitPCLMarker(sl::PCLMarker a_marker);
+
+	/** @brief Reflex's latency over the frames it last reported, up to 64. */
+	struct ReflexLatency
+	{
+		uint32_t frames = 0;
+		double pcLatencyMs = 0.0;  ///< Mean from simulation start to the end of the GPU's render: PC latency without the display.
+		double gpuFrameMs = 0.0;   ///< Mean time between GPU render ends: the rendered frame interval as the GPU saw it.
+	};
+	/**
+	 * @brief Reads Reflex's frame reports, which the PCL markers feed. False while it has none (Reflex
+	 *        unavailable, or no reports yet). Not thread safe, as slReflexGetState is not.
+	 */
+	bool SampleReflexLatency(ReflexLatency& a_latency);
 	void TagDX12Resources(ID3D12GraphicsCommandList* cmdList,
 		ID3D12Resource* depth, ID3D12Resource* mvec, ID3D12Resource* hudLessColor,
 		ID3D12Resource* uiColorAndAlpha, uint32_t width, uint32_t height);

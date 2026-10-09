@@ -833,6 +833,30 @@ void Streamline::UpdateReflex()
 		EmitPCLMarker(sl::PCLMarker::eSimulationStart);
 }
 
+bool Streamline::SampleReflexLatency(ReflexLatency& a_latency)
+{
+	a_latency = {};
+	if (!initialized || !featureReflex || !slReflexGetState)
+		return false;
+	sl::ReflexState state{};
+	if (SL_FAILED(result, slReflexGetState(state)) || !state.latencyReportAvailable)
+		return false;
+	// Report times are in microseconds, as NvAPI_D3D_GetLatency gives them; frames without both ends are skipped.
+	double latencyUs = 0.0, frameUs = 0.0;
+	for (const auto& report : state.frameReport) {
+		if (!report.simStartTime || report.gpuRenderEndTime <= report.simStartTime)
+			continue;
+		latencyUs += static_cast<double>(report.gpuRenderEndTime - report.simStartTime);
+		frameUs += report.gpuFrameTimeUs;
+		++a_latency.frames;
+	}
+	if (!a_latency.frames)
+		return false;
+	a_latency.pcLatencyMs = latencyUs / a_latency.frames / 1000.0;
+	a_latency.gpuFrameMs = frameUs / a_latency.frames / 1000.0;
+	return true;
+}
+
 void Streamline::EmitPCLMarker(sl::PCLMarker a_marker)
 {
 	if (!initialized || !featurePCL || !slPCLSetMarker)
