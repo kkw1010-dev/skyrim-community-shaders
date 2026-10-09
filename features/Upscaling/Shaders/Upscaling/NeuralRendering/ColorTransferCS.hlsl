@@ -39,6 +39,8 @@ cbuffer ColorTransfer : register(b0)
 	uint RegionActorBaseY;
 	uint RegionActorWidth;
 	uint RegionActorHeight;
+	float Mix;  // share of NR's edit applied, 0..1 (the user's mix slider)
+	float MixPad;
 	// Tone multiplier per category, Skin..Landscape in .x; 16-byte rows mirror the C++ struct.
 	float4 CategoryStrength[5];
 	uint MaterialMapEnabled;
@@ -353,7 +355,7 @@ float ToneLowAt(int2 pixel, float centerDelta)
 	float3 result = originalLinear * ratio;
 	const bool boundedGain = CompositeMode == NR::kCompositeProduction;
 	if (boundedGain)
-		result = original.rgb * NR::CompositeGain(tone * saturate(protectionWeight), NR::kMaxToneStops);
+		result = original.rgb * NR::CompositeGain(tone * saturate(protectionWeight) * saturate(Mix), NR::kMaxToneStops);
 	if (CompositeMode == NR::kCompositeReplacement)
 		result = neuralLinear;
 	else if (CompositeMode == NR::kCompositeMaskedLerp)

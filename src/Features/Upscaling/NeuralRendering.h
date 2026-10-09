@@ -14,7 +14,7 @@
 #include <mutex>
 #include <string>
 
-/** @brief Applies one native-resolution NGX Neural Rendering pass before upscaling. */
+/** @brief Applies one NGX Neural Rendering pass: before upscaling at render resolution, or on the final image. */
 struct NeuralRendering
 {
 	/** @brief What NR is doing, as the settings panel and devbench report it. */
@@ -69,6 +69,17 @@ struct NeuralRendering
 	/** @brief Stable name for the region-source diagnostic. */
 	static const char* RegionSourceName(RegionSource a_source);
 
+	/** @brief Where in the frame NR runs; saved as its number. */
+	enum class Placement : uint8_t
+	{
+		kBeforeUpscaling,  ///< Open Shaders' placement: the render-resolution scene before DLSS/FSR, luminance only.
+		kFinalImage        ///< After upscaling and tone mapping, on DLSS-G's HUD-less frame at output resolution.
+	};
+	/** @brief Highest saved placement number. */
+	static constexpr uint32_t kMaxPlacement = 1;
+	/** @brief Log and test-file name of a placement. */
+	static const char* PlacementName(Placement a_placement);
+
 	/** @brief True while the dialogue menu is open; dialogue-only gating evaluates NR only then. */
 	static bool DialogueOpen();
 
@@ -92,12 +103,30 @@ struct NeuralRendering
 	void UpdateCalibration();
 	/** @brief Invalidates the cached existing upscaling encoder. */
 	void ClearShaderCache();
-	/** @brief Draws Upscaling's NR tuning, retry controls, and runtime status. */
-	void DrawSettings(bool& enabled, NR::Context::Profiles& contexts, NR::Tuning& tuning);
+	/**
+	 * @brief Draws Upscaling's NR tuning, retry controls, and runtime status.
+	 * @param placement Saved Placement number.
+	 * @param mix Share of NR's result shown, 0 to 1.
+	 */
+	void DrawSettings(bool& enabled, uint32_t& placement, float& mix, NR::Context::Profiles& contexts, NR::Tuning& tuning);
 	/** @brief Draws the runtime DLL's verdict and how to fix it, under Upscaling's DLL tables. */
 	void DrawRuntimeDiagnostics() const;
-	/** @brief Replaces active kMAIN eye regions before upscaling and frame-generation capture. */
-	void DrawBeforeUpscaling(bool enabled, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize);
+	/**
+	 * @brief Replaces active kMAIN eye regions before upscaling and frame-generation capture, or, for the
+	 *        final-image placement, runs NR's start-up and schedules DrawOnFinalImage for this frame.
+	 * @param placement The saved placement; the final image falls back to before upscaling where it cannot run.
+	 * @param mix Share of NR's result shown, 0 to 1.
+	 */
+	void DrawBeforeUpscaling(bool enabled, Placement placement, float mix, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize);
+	/**
+	 * @brief The final-image placement: runs NR on DLSS-G's HUD-less frame before the UI is composed onto it,
+	 *        and writes the result back into that frame. Called by DX12SwapChain's compose pass; does nothing
+	 *        unless this frame's DrawBeforeUpscaling scheduled it.
+	 * @param a_hudless The HUD-less frame at output resolution, with its UAV.
+	 * @param a_depth The render-resolution depth DLSS-G was given, top-left in a display-size texture.
+	 * @param a_motion The render-resolution motion DLSS-G was given, laid out like a_depth.
+	 */
+	void DrawOnFinalImage(ID3D11Texture2D* a_hudless, ID3D11UnorderedAccessView* a_hudlessUAV, ID3D11ShaderResourceView* a_depth, ID3D11ShaderResourceView* a_motion);
 	/** @brief Draws the bounded scheduling diagnostics overlay. */
 	void DrawDiagnosticsOverlay();
 	/** @brief True while the developer has switched the diagnostics overlay on. */
@@ -143,9 +172,11 @@ struct NeuralRendering
 	/**
 	 * @brief Test aid: while the test capture is on, NR runs and rests in turns of a_seconds each, starting
 	 *        with a run, and asks DLSS-G for each turn's final HUD-less frame in its last 1.5 s, so an
-	 *        unattended run gets the same view with NR on and off. Zero, the default, turns it off.
+	 *        unattended run gets the same view with NR on and off. Each turn logs its real and output
+	 *        frame rates and NR's GPU time. Zero, the default, turns it off.
+	 * @param a_placements True makes the runs alternate placements: before upscaling, rest, final image, rest.
 	 */
-	void SetTestCycle(uint32_t a_seconds);
+	void SetTestCycle(uint32_t a_seconds, bool a_placements);
 
 private:
 	struct Impl;
@@ -171,12 +202,48 @@ private:
 	std::atomic_bool unitExposure = false;
 	/** @brief Length of one test-cycle turn in seconds; zero when off. */
 	std::atomic<uint32_t> testCycleSeconds{ 0 };
+	/** @brief The test cycle's runs alternate the two placements. */
+	std::atomic_bool testCyclePlacements = false;
 	/** @brief When the test cycle's first turn began, and the turn last logged (even turns run NR). */
 	std::chrono::steady_clock::time_point testCycleStart{};
 	uint32_t testCycleTurn = UINT32_MAX;
 	bool testCycleDumpRequested = false;
-	/** @brief The test cycle's say on this frame: a_enabled, or false during a resting turn. */
-	bool ApplyTestCycle(bool a_enabled);
+	/** @brief Name of the running turn: "on", "off", or a placement when the placements alternate. */
+	const char* testCycleTurnName = "";
+	/**
+	 * @brief The running turn's measurement: frames and DLSS-G presents counted from kTestCycleSettleSeconds
+	 *        into the turn, so a placement switch and its history warm-up stay out of the numbers.
+	 */
+	std::chrono::steady_clock::time_point testCycleWindowStart{};
+	uint32_t testCycleWindowFrames = 0;
+	uint64_t testCycleWindowPresented = 0;
+	bool testCycleWindowOpen = false;
+	/** @brief Engine frame last counted, so a second post-processing call in one frame is not counted twice. */
+	uint32_t testCycleCountedFrame = UINT32_MAX;
+	/** @brief Logs the running turn's frame rates and NR GPU time, then starts the next turn's counts. */
+	void ReportTestCycleTurn(std::chrono::steady_clock::time_point a_now);
+	/**
+	 * @brief The test cycle's say on this frame: a_enabled, or false during a resting turn; with the
+	 *        placements alternating, a run turn also sets a_placement.
+	 */
+	bool ApplyTestCycle(bool a_enabled, Placement& a_placement);
+	/** @brief What this frame's DrawBeforeUpscaling handed to the final-image pass; cleared once it runs. */
+	struct FinalRequest
+	{
+		bool pending = false;
+		uint32_t frame = 0, renderWidth = 0, renderHeight = 0, reset = 0, options = 0;
+		float mix = 1.0f;
+		NR::Tuning tuning;
+	};
+	FinalRequest finalRequest;
+	/** @brief Placement of the last applied frame; a change republishes the active status. */
+	Placement activePlacement = Placement::kBeforeUpscaling;
+	/** @brief Scheduled final-image frames DLSS-G's compose pass never ran, since the last one that ran. */
+	uint32_t finalMissed = 0;
+	/** @brief The final-image placement was asked for but cannot run here; logged once per reason change. */
+	const char* finalUnavailableLogged = nullptr;
+	/** @brief Why the final-image placement cannot run this frame, or nullptr when it can. */
+	static const char* FinalImageUnavailableReason();
 	mutable std::mutex statusMutex;
 	/** @brief True while the region-of-interest toggle is on and NR is enabled; the hook's off switch. */
 	std::atomic_bool regionEnabled = false;
@@ -226,6 +293,8 @@ private:
 	void PublishStatus(Status::State state, std::string text);
 	/** @brief Republishes the render size and eye count after the pass resources are recreated. */
 	void PublishResources();
+	/** @brief PublishResources' body, for a caller that already holds statusMutex. */
+	void PublishResourcesLocked();
 	/** @brief Publishes a failure with the prefix the panel shows for a stopped pass. */
 	void PublishFailure(const std::string& detail);
 	/** @brief Latches a failure, tearing the runtime down first when the device was removed. */

@@ -1,5 +1,6 @@
 #include "NeuralRendering.h"
 
+#include "Features/HDRDisplay.h"
 #include "Features/PostProcessing.h"
 #include "Features/Upscaling.h"
 #include "Globals.h"
@@ -22,6 +23,7 @@
 #include "Utils/UI.h"
 
 #include <chrono>
+#include <cstring>
 #include <span>
 
 #define I18N_KEY_PREFIX "feature.upscaling.neural_rendering."
@@ -29,12 +31,13 @@
 namespace
 {
 	/** @brief Active-status line; malformed braces in a translation fall back to the English text. */
-	std::string FormatActiveStatus(const std::string& runtime)
+	std::string FormatActiveStatus(const std::string& runtime, bool finalImage)
 	{
+		const char* fallback = finalImage ? "Active on the final image (runtime {})" : "Active before upscaling (runtime {})";
 		try {
-			return std::vformat(T(TKEY("status_active"), "Active (runtime {})"), std::make_format_args(runtime));
+			return std::vformat(finalImage ? T(TKEY("status_active_final"), fallback) : T(TKEY("status_active"), fallback), std::make_format_args(runtime));
 		} catch (const std::format_error&) {
-			return std::format("Active (runtime {})", runtime);
+			return std::vformat(fallback, std::make_format_args(runtime));
 		}
 	}
 
@@ -85,6 +88,15 @@ namespace
 	/** @brief Shortest test-cycle turn: the capture needs kTestCaptureAfterFrames (about 5 s) after each start. */
 	constexpr uint32_t kMinTestCycleSeconds = 10;
 
+	/** @brief Seconds into a test-cycle turn before its frame rates and GPU time are counted: a switch and NR's warm-up stay out. */
+	constexpr double kTestCycleSettleSeconds = 3.0;
+
+	/**
+	 * @brief Runtime feature slot the final-image placement evaluates in: the second eye's, which flat
+	 *        rendering never uses. Its own NGX feature keeps the output-resolution history apart.
+	 */
+	constexpr uint32_t kFinalImageSlot = 1;
+
 	/** @brief Side of the square pixel tile one SceneKeyCS Reduce group covers. */
 	constexpr uint32_t kSceneKeyTilePixels = 64;
 	/** @brief Most tiles the scene-key reduction holds: 16.7 megapixels per eye. */
@@ -114,6 +126,27 @@ namespace
 	class PassTimer
 	{
 	public:
+		/** @brief Sum, extremes and count of the samples gathered over a span. */
+		struct Totals
+		{
+			uint32_t samples = 0;
+			double sumMs = 0.0, minMs = 0.0, maxMs = 0.0;
+			void Add(double a_ms)
+			{
+				minMs = samples ? std::min(minMs, a_ms) : a_ms;
+				maxMs = samples ? std::max(maxMs, a_ms) : a_ms;
+				sumMs += a_ms;
+				++samples;
+			}
+		};
+
+		/** @param a_label The placement the timer measures, named in its log lines. */
+		explicit PassTimer(const char* a_label) :
+			label(a_label) {}
+
+		/** @brief Samples gathered since the last call, for the test cycle's per-turn line; restarts the count. */
+		Totals TakeTurn() { return std::exchange(turn, Totals{}); }
+
 		/** @brief Times the enclosing block; the destructor ends the measurement on every exit path. */
 		class Scope
 		{
@@ -187,21 +220,20 @@ namespace
 				context->GetData(a_slot.end.get(), &end, sizeof(end), kNoFlush) != S_OK || end < begin)
 				return;
 			const double ms = static_cast<double>(end - begin) * 1000.0 / static_cast<double>(disjoint.Frequency);
-			minMs = samples ? std::min(minMs, ms) : ms;
-			maxMs = samples ? std::max(maxMs, ms) : ms;
-			sumMs += ms;
-			if (++samples < kReportFrames)
+			turn.Add(ms);
+			report.Add(ms);
+			if (report.samples < kReportFrames)
 				return;
-			logger::info("[NeuralRendering] GPU time over {} frames: avg {:.3f} ms, min {:.3f} ms, max {:.3f} ms", samples, sumMs / samples, minMs, maxMs);
-			samples = 0;
-			sumMs = minMs = maxMs = 0.0;
+			logger::info("[NeuralRendering] GPU time over {} frames ({}): avg {:.3f} ms, min {:.3f} ms, max {:.3f} ms", report.samples, label,
+				report.sumMs / report.samples, report.minMs, report.maxMs);
+			report = {};
 		}
 
+		const char* label;
 		std::array<Slot, kSlots> slots;
 		uint32_t next = 0;
 		bool open = false;
-		uint32_t samples = 0;
-		double sumMs = 0.0, minMs = 0.0, maxMs = 0.0;
+		Totals report, turn;
 	};
 }
 
@@ -219,8 +251,53 @@ struct NeuralRendering::Impl
 		DirectX::SimpleMath::Vector3 position{}, forward{};
 	};
 	std::array<Eye, 2> eyes;
+	/**
+	 * @brief The final-image placement's pass: the HUD-less frame's copy, the output-size proxy, guides
+	 *        and output the runtime shares, and the temporal state of its own NGX feature (kFinalImageSlot).
+	 */
+	struct FinalImage
+	{
+		std::unique_ptr<WrappedResource> color, depth, motion, output;
+		/** @brief The HUD-less frame as it was before NR: the composite's original and the test capture's "before". */
+		std::unique_ptr<Texture2D> original;
+		NR::FrameParameters frame;
+		DirectX::SimpleMath::Vector3 position{}, forward{};
+		uint32_t width = 0, height = 0;
+		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+		/** @brief Engine frame the pass last ran on; a gap resets the history. */
+		uint32_t lastFrame = UINT32_MAX;
+	} finalImage;
+	/** @brief FinalImageCS.hlsl cbuffer: the output and rendered sizes and the share of NR shown. */
+	struct alignas(16) FinalImageData
+	{
+		uint32_t outputWidth, outputHeight, renderWidth, renderHeight;
+		float mix;
+		float3 pad{};
+	};
+	static_assert(sizeof(FinalImageData) == 32);
+	std::unique_ptr<ConstantBuffer> finalImageBuffer;
+	Util::LazyShader<ID3D11ComputeShader> finalPrepare, finalComposite;
 	winrt::com_ptr<ID3D11DeviceContext1> context;
 	winrt::com_ptr<ID3DDeviceContextState> isolated;
+	/** @brief Runs the enclosing block in NR's own context state and gives the game's state back on every exit path. */
+	struct IsolatedContext
+	{
+		ID3D11DeviceContext1* context;
+		winrt::com_ptr<ID3DDeviceContextState> previous;
+		IsolatedContext(ID3D11DeviceContext1* a_context, ID3DDeviceContextState* a_isolated) :
+			context(a_context)
+		{
+			context->SwapDeviceContextState(a_isolated, previous.put());
+			context->ClearState();
+		}
+		~IsolatedContext()
+		{
+			context->ClearState();
+			context->SwapDeviceContextState(previous.get(), nullptr);
+		}
+		IsolatedContext(const IsolatedContext&) = delete;
+		IsolatedContext& operator=(const IsolatedContext&) = delete;
+	};
 	Util::LazyShader<ID3D11ComputeShader> prepareColor, prepareToneData, compositeColor, materialAlphaShader;
 	/** @brief Cbuffer CategoryAlphaCS.hlsl reads: the eye extent, the stereo offset, the softness radius and the six strengths. */
 	struct alignas(16) CategoryAlphaData
@@ -248,7 +325,8 @@ struct NeuralRendering::Impl
 		uint32_t regionOverlayEnabled = 0;
 		float regionOutlineThickness = kRegionOutlineThicknessPixels;
 		uint32_t regionActorBaseX = 0, regionActorBaseY = 0, regionActorWidth = 0, regionActorHeight = 0;
-		float2 pad{};
+		float mix = 1.0f;  ///< Share of NR's edit applied (the mix slider); fills what was padding.
+		float mixPad = 0.0f;
 		// Per-category tone multipliers, Skin..Landscape in .x; the 16-byte rows mirror
 		// ColorTransferCS.hlsl's float4 CategoryStrength[5].
 		float4 categoryStrength[5]{};
@@ -266,7 +344,7 @@ struct NeuralRendering::Impl
 	static_assert(offsetof(ColorTransferData, regionOutlineThickness) == 116);
 	static_assert(offsetof(ColorTransferData, regionActorBaseX) == 120);
 	static_assert(offsetof(ColorTransferData, regionActorHeight) == 132);
-	static_assert(offsetof(ColorTransferData, pad) == 136);
+	static_assert(offsetof(ColorTransferData, mix) == 136);
 	static_assert(offsetof(ColorTransferData, categoryStrength) == 144);
 	static_assert(offsetof(ColorTransferData, materialMapEnabled) == 224);
 	static_assert(offsetof(ColorTransferData, materialMapStrengthBound) == 236);
@@ -319,7 +397,11 @@ struct NeuralRendering::Impl
 	std::array<float, NR::MaterialStrength::kCount> materialMapStrength{};
 	NR::Diagnostics* captureDiagnostics = nullptr;
 	uint32_t captureFrame = UINT32_MAX;
-	PassTimer passTimer;
+	/** @brief Share of NR's result shown, 0 to 1: the user's mix, set before each frame. */
+	float mix = 1.0f;
+	PassTimer passTimer{ "before upscaling" }, finalPassTimer{ "final image" };
+	/** @brief File-name stage of the running test capture: "test" before upscaling, "final" on the final image. */
+	const char* testStage = "test";
 	/** @brief One frame of a test capture: render-size copies of the scene before and after NR. */
 	struct TestFrame
 	{
@@ -389,6 +471,7 @@ struct NeuralRendering::Impl
 		encodeBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<Upscaling::UpscalingDataCB>(), "NeuralRendering::Encode CB");
 		colorBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<ColorTransferData>(), "NeuralRendering::ColorTransfer CB");
 		categoryAlphaBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<CategoryAlphaData>(), "NeuralRendering::CategoryAlpha CB");
+		finalImageBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<FinalImageData>(), "NeuralRendering::FinalImage CB");
 		runtime.Initialize(interop.Device(), RuntimeDirectory(), globals::state->IsDeveloperMode());
 		ready = true;
 	}
@@ -404,6 +487,10 @@ struct NeuralRendering::Impl
 		eyes = {};
 		original.reset();
 		encodeMasks = {};
+		finalImage = {};
+		// A running test capture copies from the textures released here.
+		testFrames.clear();
+		testFramesCopied = 0;
 		materialStrengthInFlight = materialStrengthBound = false;
 		width = height = guideWidth = guideHeight = eyeCount = 0;
 		format = DXGI_FORMAT_UNKNOWN;
@@ -411,8 +498,43 @@ struct NeuralRendering::Impl
 		lastRegion = {};
 	}
 
-	/** @brief True while pass resources for a render size exist and can be released. */
-	bool HasPassResources() const { return eyeCount != 0; }
+	/** @brief True while pass resources for either placement exist and can be released. */
+	bool HasPassResources() const { return eyeCount != 0 || finalImage.width != 0; }
+
+	/** @brief True while the before-upscaling placement's resources exist. */
+	bool HasBeforeUpscalingResources() const { return eyeCount != 0; }
+
+	/**
+	 * @brief Creates the final-image pass for an output size and format. A change releases every pass
+	 *        resource first, the runtime's features included, so the new size starts a fresh history.
+	 */
+	void EnsureFinalResources(uint32_t w, uint32_t h, DXGI_FORMAT frameFormat, bool force)
+	{
+		auto& pass = finalImage;
+		if (!force && pass.width == w && pass.height == h && pass.format == frameFormat)
+			return;
+		ReleasePassResources();
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = w;
+		desc.Height = h;
+		desc.Format = frameFormat;
+		desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		pass.original = std::make_unique<Texture2D>(desc, "NeuralRendering::FinalImage Original");
+		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+		srv.Format = frameFormat;
+		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		srv.Texture2D.MipLevels = 1;
+		pass.original->CreateSRV(srv);
+		pass.color = interop.CreateTexture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, "NeuralRendering::FinalImage Input");
+		pass.depth = interop.CreateTexture(w, h, DXGI_FORMAT_R32_FLOAT, "NeuralRendering::FinalImage Depth");
+		pass.motion = interop.CreateTexture(w, h, DXGI_FORMAT_R16G16_FLOAT, "NeuralRendering::FinalImage Motion");
+		pass.output = interop.CreateTexture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, "NeuralRendering::FinalImage Output");
+		pass.width = w;
+		pass.height = h;
+		pass.format = frameFormat;
+		logger::info("[NeuralRendering] final-image NR {}x{}, frame format {}", w, h, static_cast<uint32_t>(frameFormat));
+	}
 
 	/** @brief Publishes this frame's crop for one eye; every kernel that reads a neural sample needs it. */
 	void SetRegion(ColorTransferData& a_data, uint32_t a_eye) const
@@ -488,59 +610,77 @@ struct NeuralRendering::Impl
 	uint32_t UpdateFrame(uint32_t i, uint32_t reset, NR::Diagnostics::Frame& diagnostic)
 	{
 		auto& eye = eyes[i];
+		return UpdateCamera(i, eye.position, eye.forward, eye.frame, reset, diagnostic.options, diagnostic.camera[i], true);
+	}
+
+	/**
+	 * @brief Detects camera cuts against what one NGX feature last saw and fills its frame parameters.
+	 * @param a_camera The engine camera (eye) the frame was rendered from.
+	 * @param a_jittered False for a frame without the upscaler's jitter, such as the final image.
+	 * @return The reset reasons, a_reset plus the requested and detected ones that apply.
+	 */
+	uint32_t UpdateCamera(uint32_t a_camera, DirectX::SimpleMath::Vector3& a_position, DirectX::SimpleMath::Vector3& a_forward, NR::FrameParameters& a_frame,
+		uint32_t a_reset, uint32_t a_options, NR::Diagnostics::CameraSample& sample, bool a_jittered)
+	{
 		auto& cached = globals::game::frameBufferCached;
-		const auto inverseView = cached.GetCameraViewInverse(i).Transpose();
-		const auto projection = cached.GetCameraProjUnjittered(i).Transpose();
-		const auto adjusted = cached.GetCameraPosAdjust(i);
+		const auto inverseView = cached.GetCameraViewInverse(a_camera).Transpose();
+		const auto projection = cached.GetCameraProjUnjittered(a_camera).Transpose();
+		const auto adjusted = cached.GetCameraPosAdjust(a_camera);
 		const DirectX::SimpleMath::Vector3 position{ adjusted.x, adjusted.y, adjusted.z };
 		const DirectX::SimpleMath::Vector3 forward{ inverseView._31, inverseView._32, inverseView._33 };
-		auto& sample = diagnostic.camera[i];
-		const auto enginePrevious = cached.GetCameraPreviousPosAdjust(i);
+		const auto enginePrevious = cached.GetCameraPreviousPosAdjust(a_camera);
 		sample.position = { position.x, position.y, position.z };
-		sample.previous = { eye.position.x, eye.position.y, eye.position.z };
+		sample.previous = { a_position.x, a_position.y, a_position.z };
 		sample.enginePrevious = { enginePrevious.x, enginePrevious.y, enginePrevious.z };
 		sample.viewTranslation = { inverseView._41, inverseView._42, inverseView._43 };
-		sample.distance = (position - eye.position).Length();
-		sample.directionDot = forward.Dot(eye.forward);
-		sample.projectionDelta = std::max(std::abs(projection._11 - eye.frame.viewToClip._11), std::abs(projection._22 - eye.frame.viewToClip._22));
+		sample.distance = (position - a_position).Length();
+		sample.directionDot = forward.Dot(a_forward);
+		sample.projectionDelta = std::max(std::abs(projection._11 - a_frame.viewToClip._11), std::abs(projection._22 - a_frame.viewToClip._22));
 		uint32_t cameraReset = 0;
-		if ((position - eye.position).LengthSquared() > NR::kCameraCutDistance * NR::kCameraCutDistance)
+		if ((position - a_position).LengthSquared() > NR::kCameraCutDistance * NR::kCameraCutDistance)
 			cameraReset |= NR::Diagnostics::CameraPosition;
-		if (forward.Dot(eye.forward) < NR::kCameraCutDirectionDot)
+		if (forward.Dot(a_forward) < NR::kCameraCutDirectionDot)
 			cameraReset |= NR::Diagnostics::CameraDirection;
-		if (std::abs(projection._11 - eye.frame.viewToClip._11) > NR::kProjectionCutThreshold ||
-			std::abs(projection._22 - eye.frame.viewToClip._22) > NR::kProjectionCutThreshold)
+		if (std::abs(projection._11 - a_frame.viewToClip._11) > NR::kProjectionCutThreshold ||
+			std::abs(projection._22 - a_frame.viewToClip._22) > NR::kProjectionCutThreshold)
 			cameraReset |= NR::Diagnostics::Projection;
 		sample.detected = cameraReset;
-		if (diagnostic.options & NR::Diagnostics::ApplyCameraCuts) {
-			if (diagnostic.options & NR::Diagnostics::IgnorePosition)
+		if (a_options & NR::Diagnostics::ApplyCameraCuts) {
+			if (a_options & NR::Diagnostics::IgnorePosition)
 				cameraReset &= ~NR::Diagnostics::CameraPosition;
-			reset |= cameraReset;
+			a_reset |= cameraReset;
 		}
-		if (diagnostic.options & NR::Diagnostics::ForceReset)
-			reset |= NR::Diagnostics::Requested;
-		eye.frame.reset = reset != 0;
-		eye.position = position;
-		eye.forward = forward;
-		eye.frame.worldToView = inverseView.Invert();
-		eye.frame.viewToClip = projection;
-		const auto jitter = globals::features::upscaling.jitter;
-		eye.frame.jitterX = NR::SanitizeJitter(-jitter.x);
-		eye.frame.jitterY = NR::SanitizeJitter(-jitter.y);
-		eye.frame.frameTimeMs = NR::SanitizeFrameTimeMs(*globals::game::deltaTime * 1000.0f);
-		eye.frame.feedCameraData = (diagnostic.options & NR::Diagnostics::FeedCameraData) != 0;
-		if (diagnostic.options & NR::Diagnostics::ZeroJitter)
-			eye.frame.jitterX = eye.frame.jitterY = 0;
-		sample.jitterX = eye.frame.jitterX;
-		sample.jitterY = eye.frame.jitterY;
-		sample.frameTimeMs = eye.frame.frameTimeMs;
-		return reset;
+		if (a_options & NR::Diagnostics::ForceReset)
+			a_reset |= NR::Diagnostics::Requested;
+		a_frame.reset = a_reset != 0;
+		a_position = position;
+		a_forward = forward;
+		a_frame.worldToView = inverseView.Invert();
+		a_frame.viewToClip = projection;
+		const auto jitter = a_jittered ? globals::features::upscaling.jitter : float2{};
+		a_frame.jitterX = NR::SanitizeJitter(-jitter.x);
+		a_frame.jitterY = NR::SanitizeJitter(-jitter.y);
+		a_frame.frameTimeMs = NR::SanitizeFrameTimeMs(*globals::game::deltaTime * 1000.0f);
+		a_frame.feedCameraData = (a_options & NR::Diagnostics::FeedCameraData) != 0;
+		if (a_options & NR::Diagnostics::ZeroJitter)
+			a_frame.jitterX = a_frame.jitterY = 0;
+		sample.jitterX = a_frame.jitterX;
+		sample.jitterY = a_frame.jitterY;
+		sample.frameTimeMs = a_frame.frameTimeMs;
+		return a_reset;
 	}
 
 	void Transition(ID3D12GraphicsCommandList* commands, Eye& eye, bool enter)
 	{
-		ID3D12Resource* resources[5]{ eye.color->resource.get(), eye.depth->resource.get(), eye.motion->resource.get(),
-			eye.output->resource.get(), eye.materialAlpha ? eye.materialAlpha->resource.get() : nullptr };
+		Transition(commands, eye.color->resource.get(), eye.depth->resource.get(), eye.motion->resource.get(),
+			eye.output->resource.get(), eye.materialAlpha ? eye.materialAlpha->resource.get() : nullptr, enter);
+	}
+
+	/** @brief Moves the shared NR resources between COMMON and the states the evaluate reads and writes them in. */
+	static void Transition(ID3D12GraphicsCommandList* commands, ID3D12Resource* color, ID3D12Resource* depth, ID3D12Resource* motion,
+		ID3D12Resource* output, ID3D12Resource* alpha, bool enter)
+	{
+		ID3D12Resource* resources[5]{ color, depth, motion, output, alpha };
 		const D3D12_RESOURCE_STATES states[5]{
 			D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
 			D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -623,6 +763,7 @@ struct NeuralRendering::Impl
 		if (debugOptions & (NR::Diagnostics::VisualizeMask | NR::Diagnostics::VisualizeSkinMask | NR::Diagnostics::VisualizeAutoMask))
 			data.visualMode = static_cast<uint32_t>(NR::Diagnostics::VisualMode::Mask);
 		data.manualExposure = manualExposure;
+		data.mix = mix;
 		data.differenceStrength = differenceStrength;
 		data.splitPosition = splitPosition;
 		data.dynamicRangeProtect = float4{ shadowProtect, highlightProtect, 0.0f, 0.0f };
@@ -736,23 +877,30 @@ struct NeuralRendering::Impl
 	/**
 	 * @brief Allocates the copies for a test capture of the next a_frames NR frames. Copying on the
 	 *        GPU and writing only after the last frame keeps the captured frames free of readback stalls.
-	 * @return False when the pass resources or a copy texture are missing.
+	 * @param a_before The texture the "before" copies are made from (its size and format).
+	 * @param a_after The texture the "after" copies are made from.
+	 * @param a_stage File-name stage prefix: "test" before upscaling, "final" on the final image.
+	 * @return False when a copy texture cannot be made.
 	 */
-	bool StartTestCapture(uint32_t a_frames)
+	bool StartTestCapture(uint32_t a_frames, ID3D11Resource* a_before, ID3D11Resource* a_after, const char* a_stage)
 	{
 		testFrames.clear();
 		testFramesCopied = 0;
-		if (!original || !eyes[0].resolved)
+		testStage = a_stage;
+		winrt::com_ptr<ID3D11Texture2D> beforeTexture, afterTexture;
+		if (!a_before || !a_after || FAILED(a_before->QueryInterface(beforeTexture.put())) || FAILED(a_after->QueryInterface(afterTexture.put())))
 			return false;
-		const auto copyDesc = [](D3D11_TEXTURE2D_DESC a_desc) {
-			a_desc.Usage = D3D11_USAGE_DEFAULT;
-			a_desc.BindFlags = 0;
-			a_desc.CPUAccessFlags = 0;
-			a_desc.MiscFlags = 0;
-			return a_desc;
+		const auto copyDesc = [](ID3D11Texture2D* a_source) {
+			D3D11_TEXTURE2D_DESC desc{};
+			a_source->GetDesc(&desc);
+			desc.Usage = D3D11_USAGE_DEFAULT;
+			desc.BindFlags = 0;
+			desc.CPUAccessFlags = 0;
+			desc.MiscFlags = 0;
+			return desc;
 		};
-		const auto beforeDesc = copyDesc(original->desc);
-		const auto afterDesc = copyDesc(eyes[0].resolved->desc);
+		const auto beforeDesc = copyDesc(beforeTexture.get());
+		const auto afterDesc = copyDesc(afterTexture.get());
 		testFrames.resize(a_frames);
 		for (auto& frame : testFrames) {
 			if (FAILED(globals::d3d::device->CreateTexture2D(&beforeDesc, nullptr, frame.before.put())) ||
@@ -768,6 +916,17 @@ struct NeuralRendering::Impl
 
 	/** @brief True once every frame of the running test capture has been copied. */
 	bool TestCaptureComplete() const { return !testFrames.empty() && testFramesCopied == testFrames.size(); }
+
+	/** @brief Copies this frame's before and after into the running test capture, if it still wants frames. */
+	void CopyTestFrame(ID3D11Resource* a_before, ID3D11Resource* a_after, uint32_t a_frame)
+	{
+		if (testFramesCopied >= testFrames.size())
+			return;
+		auto& copy = testFrames[testFramesCopied++];
+		context->CopyResource(copy.before.get(), a_before);
+		context->CopyResource(copy.after.get(), a_after);
+		copy.frame = a_frame;
+	}
 
 	/**
 	 * @brief Measures the first eye's scene key from the original copy and eases the adapted key toward it,
@@ -871,11 +1030,13 @@ struct NeuralRendering::Impl
 	/** @brief Writes the finished test capture as lossless DDS through the diagnostics writer, then frees the copies. */
 	void WriteTestCapture(NR::Diagnostics& diagnostics)
 	{
+		const auto before = std::format("{}_before", testStage);
+		const auto after = std::format("{}_after", testStage);
 		for (const auto& frame : testFrames) {
-			diagnostics.DumpTexture("test_before", frame.before.get(), frame.frame);
-			diagnostics.DumpTexture("test_after", frame.after.get(), frame.frame);
+			diagnostics.DumpTexture(before.c_str(), frame.before.get(), frame.frame);
+			diagnostics.DumpTexture(after.c_str(), frame.after.get(), frame.frame);
 		}
-		logger::info("[NeuralRendering] test capture written: {} frames", testFrames.size());
+		logger::info("[NeuralRendering] test capture written: {} {} frames", testFrames.size(), testStage);
 		testFrames.clear();
 		testFramesCopied = 0;
 	}
@@ -885,22 +1046,7 @@ struct NeuralRendering::Impl
 		CS_GPU_PASS("Upscaling::NeuralRendering");
 		captureDiagnostics = &diagnostics;
 		captureFrame = diagnostic.number;
-		struct ContextScope
-		{
-			ID3D11DeviceContext1* context;
-			winrt::com_ptr<ID3DDeviceContextState> previous;
-			ContextScope(ID3D11DeviceContext1* ctx, ID3DDeviceContextState* isolated) :
-				context(ctx)
-			{
-				context->SwapDeviceContextState(isolated, previous.put());
-				context->ClearState();
-			}
-			~ContextScope()
-			{
-				context->ClearState();
-				context->SwapDeviceContextState(previous.get(), nullptr);
-			}
-		} scope(context.get(), isolated.get());
+		const IsolatedContext scope(context.get(), isolated.get());
 		const D3D11_BOX originalBox{ 0, 0, 0, width * eyeCount, height, 1 };
 		context->CopySubresourceRegion(original->resource.get(), 0, 0, 0, 0, color, 0, &originalBox);
 		SelectExposure();
@@ -1052,14 +1198,86 @@ struct NeuralRendering::Impl
 		}
 		if (capture)
 			diagnostics.DumpTexture("04_post_composite", color, diagnostic.number);
-		if (testFramesCopied < testFrames.size()) {
-			auto& copy = testFrames[testFramesCopied++];
-			context->CopyResource(copy.before.get(), original->resource.get());
-			context->CopyResource(copy.after.get(), eyes[0].resolved->resource.get());
-			copy.frame = diagnostic.number;
-		}
+		CopyTestFrame(original->resource.get(), eyes[0].resolved->resource.get(), diagnostic.number);
 		// Capture stays open for Main_PostProcessing's pre-SR/post-SR stages; CaptureAfterUpscaling finishes it.
 		captureDiagnostics = nullptr;
+		return true;
+	}
+
+	/**
+	 * @brief One frame of the final-image placement: copies the HUD-less frame, builds the output-size
+	 *        input and guides from it and from DLSS-G's depth and motion, evaluates the runtime in
+	 *        kFinalImageSlot, and writes the model's output back into the HUD-less frame, mixed with the
+	 *        original by the user's share. EnsureFinalResources must have run for this frame's size.
+	 * @param a_reset History reset reasons from the caller; the camera checks add theirs as the other placement does.
+	 * @return False when the runtime failed to evaluate; the HUD-less frame is then left as it was.
+	 */
+	bool DrawFinal(ID3D11Texture2D* a_hudless, ID3D11UnorderedAccessView* a_hudlessUAV, ID3D11ShaderResourceView* a_depth, ID3D11ShaderResourceView* a_motion,
+		uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_reset, uint32_t a_options, const NR::Tuning& a_tuning, uint32_t a_frame)
+	{
+		CS_GPU_PASS("Upscaling::NeuralRenderingFinal");
+		auto* prepare = finalPrepare.Get(L"Data/Shaders/Upscaling/NeuralRendering/FinalImageCS.hlsl", {}, "cs_5_0", "Prepare", "NeuralRendering::FinalImagePrepare CS");
+		auto* composite = finalComposite.Get(L"Data/Shaders/Upscaling/NeuralRendering/FinalImageCS.hlsl", {}, "cs_5_0", "Composite", "NeuralRendering::FinalImageComposite CS");
+		if (!prepare || !composite)
+			throw std::runtime_error("NR final-image shader unavailable");
+		auto& pass = finalImage;
+		const IsolatedContext scope(context.get(), isolated.get());
+		context->CopyResource(pass.original->resource.get(), a_hudless);
+		NR::Diagnostics::CameraSample camera;
+		UpdateCamera(0, pass.position, pass.forward, pass.frame, a_reset, a_options, camera, false);
+		finalImageBuffer->Update(FinalImageData{ pass.width, pass.height, a_renderWidth, a_renderHeight, std::clamp(mix, 0.0f, 1.0f) });
+		auto* buffer = finalImageBuffer->CB();
+		{
+			CS_GPU_PASS("Upscaling::NRFinalPrepare");
+			context->CSSetConstantBuffers(0, 1, &buffer);
+			ID3D11ShaderResourceView* inputs[]{ pass.original->srv.get(), a_depth, a_motion };
+			ID3D11UnorderedAccessView* outputs[]{ pass.color->uav, pass.depth->uav, pass.motion->uav };
+			context->CSSetShaderResources(0, ARRAYSIZE(inputs), inputs);
+			context->CSSetUnorderedAccessViews(0, ARRAYSIZE(outputs), outputs, nullptr);
+			context->CSSetShader(prepare, nullptr, 0);
+			context->Dispatch((pass.width + 7) / 8, (pass.height + 7) / 8, 1);
+			if (pass.frame.reset || (a_options & NR::Diagnostics::ZeroMotion)) {
+				constexpr float zero[4]{};
+				context->ClearUnorderedAccessViewFloat(pass.motion->uav, zero);
+			}
+			context->ClearState();
+		}
+		// Resetting persistent NR history must not overlap its prior GPU evaluation.
+		if (pass.frame.reset)
+			interop.Drain();
+		bool success = false;
+		{
+			CS_GPU_PASS("Upscaling::NRFinalEvaluate");
+			auto* commands = interop.Begin();
+			Transition(commands, pass.color->resource.get(), pass.depth->resource.get(), pass.motion->resource.get(), pass.output->resource.get(), nullptr, true);
+			const NR::GuideRegion whole{ 0, 0, pass.width, pass.height };
+			NR::GuideParameters guides;
+			guides.depth = whole;
+			guides.motion = whole;
+			guides.colorOutput = whole;
+			// The engine's motion is a normalized UV displacement, the same at any resolution; NR consumes input pixels.
+			guides.motionScaleX = static_cast<float>(pass.width);
+			guides.motionScaleY = static_cast<float>(pass.height);
+			guides.depthInverted = false;
+			success = runtime.Evaluate(commands, kFinalImageSlot, pass.color->resource.get(), pass.depth->resource.get(), pass.motion->resource.get(),
+				pass.output->resource.get(), {}, pass.width, pass.height, guides, pass.frame, a_tuning);
+			Transition(commands, pass.color->resource.get(), pass.depth->resource.get(), pass.motion->resource.get(), pass.output->resource.get(), nullptr, false);
+			interop.End();
+		}
+		if (!success)
+			return false;
+		{
+			CS_GPU_PASS("Upscaling::NRFinalComposite");
+			context->CSSetConstantBuffers(0, 1, &buffer);
+			ID3D11ShaderResourceView* inputs[]{ pass.original->srv.get(), pass.output->srv };
+			context->CSSetShaderResources(0, ARRAYSIZE(inputs), inputs);
+			context->CSSetUnorderedAccessViews(0, 1, &a_hudlessUAV, nullptr);
+			context->CSSetShader(composite, nullptr, 0);
+			context->Dispatch((pass.width + 7) / 8, (pass.height + 7) / 8, 1);
+			context->ClearState();
+		}
+		CopyTestFrame(pass.original->resource.get(), a_hudless, a_frame);
+		pass.lastFrame = a_frame;
 		return true;
 	}
 };
@@ -1159,30 +1377,104 @@ bool NeuralRendering::DialogueOpen()
 void NeuralRendering::SetupResources() { retryRequested = recreate = resetHistory = true; }
 void NeuralRendering::SetTestCapture(uint32_t a_frames) { testCaptureFrames.store(std::min(a_frames, kMaxTestCaptureFrames), std::memory_order_relaxed); }
 void NeuralRendering::SetUnitExposure(bool a_unit) { unitExposure.store(a_unit, std::memory_order_relaxed); }
-void NeuralRendering::SetTestCycle(uint32_t a_seconds) { testCycleSeconds.store(a_seconds ? std::max(a_seconds, kMinTestCycleSeconds) : 0, std::memory_order_relaxed); }
+void NeuralRendering::SetTestCycle(uint32_t a_seconds, bool a_placements)
+{
+	testCycleSeconds.store(a_seconds ? std::max(a_seconds, kMinTestCycleSeconds) : 0, std::memory_order_relaxed);
+	testCyclePlacements.store(a_placements, std::memory_order_relaxed);
+}
 
-bool NeuralRendering::ApplyTestCycle(bool a_enabled)
+const char* NeuralRendering::PlacementName(Placement a_placement)
+{
+	return a_placement == Placement::kFinalImage ? "final" : "before";
+}
+
+const char* NeuralRendering::FinalImageUnavailableReason()
+{
+	auto& upscaling = globals::features::upscaling;
+	if (globals::game::isVR)
+		return "VR has no final-image pass";
+	// The pass rides on DLSS-G's UI composition, the only point with the frame before its UI.
+	if (!upscaling.UsesDLSSGFrameGen() || !upscaling.settings.frameGenerationMode)
+		return "it needs DLSS frame generation";
+	if (globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.settings.enableHDR)
+		return "HDR output is not supported";
+	return nullptr;
+}
+
+void NeuralRendering::ReportTestCycleTurn(std::chrono::steady_clock::time_point a_now)
+{
+	// Taken every turn so a turn's GPU time never carries into the next.
+	const auto beforeTimes = impl->passTimer.TakeTurn();
+	const auto finalTimes = impl->finalPassTimer.TakeTurn();
+	if (!testCycleWindowOpen)
+		return;
+	testCycleWindowOpen = false;
+	const double seconds = std::chrono::duration<double>(a_now - testCycleWindowStart).count();
+	if (seconds <= 0.0 || !testCycleWindowFrames)
+		return;
+	const double realFps = testCycleWindowFrames / seconds;
+	// Without DLSS-G nothing is generated, so every rendered frame is the one presented.
+	const double outputFps = testCycleWindowPresented ? testCycleWindowPresented / seconds : realFps;
+	const auto& timer = finalTimes.samples ? finalTimes : beforeTimes;
+	const std::string gpu = timer.samples ? std::format("NR GPU avg {:.3f} ms (min {:.3f}, max {:.3f}) over {} frames", timer.sumMs / timer.samples, timer.minMs, timer.maxMs, timer.samples) :
+	                                        std::string("no NR GPU time");
+	logger::info("[NeuralRendering] test cycle: turn {} ({}) over {:.1f} s: real {:.1f} fps, output {:.1f} fps ({:.2f} presented per frame), {}",
+		testCycleTurn, testCycleTurnName, seconds, realFps, outputFps, testCycleWindowPresented ? static_cast<double>(testCycleWindowPresented) / testCycleWindowFrames : 1.0, gpu);
+}
+
+bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 {
 	const auto seconds = testCycleSeconds.load(std::memory_order_relaxed);
 	if (!a_enabled || !seconds || !testCaptureFrames.load(std::memory_order_relaxed) || !globals::state->worldRenderedThisFrame)
 		return a_enabled;
+	const bool placements = testCyclePlacements.load(std::memory_order_relaxed);
 	const auto now = std::chrono::steady_clock::now();
 	if (testCycleTurn == UINT32_MAX) {
 		testCycleStart = now;
-		logger::info("[NeuralRendering] test cycle: {} s with NR, {} s without, in turns", seconds, seconds);
+		if (placements)
+			logger::info("[NeuralRendering] test cycle: {} s turns of NR before upscaling, none, NR on the final image, none", seconds);
+		else
+			logger::info("[NeuralRendering] test cycle: {} s with NR, {} s without, in turns", seconds, seconds);
 	}
 	const double elapsed = std::chrono::duration<double>(now - testCycleStart).count();
 	const auto turn = static_cast<uint32_t>(elapsed / seconds);
 	const bool run = turn % 2 == 0;
+	if (run && placements)
+		a_placement = turn % 4 == 0 ? Placement::kBeforeUpscaling : Placement::kFinalImage;
+	const char* name = !run ? "off" : placements ? PlacementName(a_placement) : "on";
 	if (turn != testCycleTurn) {
+		if (testCycleTurn != UINT32_MAX)
+			ReportTestCycleTurn(now);
 		testCycleTurn = turn;
+		testCycleTurnName = name;
 		testCycleDumpRequested = false;
-		logger::info("[NeuralRendering] test cycle: turn {}, NR {}", turn, run ? "on" : "off");
+		testCycleWindowFrames = 0;
+		testCycleWindowPresented = 0;
+		logger::info("[NeuralRendering] test cycle: turn {}, NR {}", turn, name);
+	}
+	// Counted from kTestCycleSettleSeconds in, so a placement switch and NR's warm-up stay out of the numbers.
+	const double intoTurn = elapsed - static_cast<double>(turn) * seconds;
+	const auto frame = globals::state->frameCount;
+	if (intoTurn >= kTestCycleSettleSeconds && frame != testCycleCountedFrame) {
+		testCycleCountedFrame = frame;
+		if (!testCycleWindowOpen) {
+			testCycleWindowOpen = true;
+			testCycleWindowStart = now;
+			// The GPU time of the settling seconds goes with them.
+			impl->passTimer.TakeTurn();
+			impl->finalPassTimer.TakeTurn();
+		} else {
+			// The window's first frame only starts the clock: frames are counted as intervals.
+			++testCycleWindowFrames;
+			auto& upscaling = globals::features::upscaling;
+			if (upscaling.UsesDLSSGFrameGen() && upscaling.IsFrameGenerationActive())
+				testCycleWindowPresented += upscaling.streamlineDX12.lastDLSSGFramesPresented;
+		}
 	}
 	// The turn's last 1.5 s: NR's history, or its absence, has settled by then.
-	if (!testCycleDumpRequested && elapsed - static_cast<double>(turn) * seconds >= seconds - 1.5) {
+	if (!testCycleDumpRequested && intoTurn >= seconds - 1.5) {
 		testCycleDumpRequested = true;
-		globals::features::upscaling.dx12SwapChain.RequestTestDump(std::format(L"t{:02}-{}", turn, run ? L"on" : L"off"));
+		globals::features::upscaling.dx12SwapChain.RequestTestDump(std::format(L"t{:02}-{}", turn, std::wstring(name, name + std::strlen(name))));
 		logger::info("[NeuralRendering] test cycle: turn {} final frame requested", turn);
 	}
 	return run;
@@ -1211,12 +1503,10 @@ void NeuralRendering::PublishStatus(Status::State state, std::string text)
 	next.text = std::move(text);
 	next.failed = state == Status::State::kFailed;
 	next.runtimeVersion = impl->runtime.Version();
-	next.width = impl->width;
-	next.height = impl->height;
-	next.eyes = impl->eyeCount;
 	std::scoped_lock lock(statusMutex);
 	status = std::move(next);
 	publishedState.store(state, std::memory_order_relaxed);
+	PublishResourcesLocked();
 }
 
 void NeuralRendering::PublishFailure(const std::string& detail)
@@ -1227,9 +1517,16 @@ void NeuralRendering::PublishFailure(const std::string& detail)
 void NeuralRendering::PublishResources()
 {
 	std::scoped_lock lock(statusMutex);
-	status.width = impl->width;
-	status.height = impl->height;
-	status.eyes = impl->eyeCount;
+	PublishResourcesLocked();
+}
+
+void NeuralRendering::PublishResourcesLocked()
+{
+	// The final-image pass reports its output size as one eye; the other placement its render size.
+	const auto& pass = impl->finalImage;
+	status.width = pass.width ? pass.width : impl->width;
+	status.height = pass.width ? pass.height : impl->height;
+	status.eyes = pass.width ? 1 : impl->eyeCount;
 }
 
 NeuralRendering::Status NeuralRendering::GetStatus() const
@@ -1482,7 +1779,7 @@ namespace
 	}
 }
 
-void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& contexts, NR::Tuning& tuning)
+void NeuralRendering::DrawSettings(bool& enabled, uint32_t& placement, float& mix, NR::Context::Profiles& contexts, NR::Tuning& tuning)
 {
 	ImGui::PushID("NeuralRendering");
 	const auto availability = GetRuntimeAvailability();
@@ -1512,7 +1809,29 @@ void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& context
 			Util::Text::Disabled("%s", RuntimeFixHint(availability.state));
 	}
 	ImGui::TextWrapped("%s", T(TKEY("description"),
-								 "One display-referred NR proxy pass at eye render resolution, composed back into scene-linear HDR before DLSS/FSR and frame-generation capture. Requires an NR-capable NVIDIA GPU and a validated 310.8 runtime build."));
+								 "Runs NVIDIA's neural rendering model on the scene, before upscaling or on the final image. Requires an NR-capable NVIDIA GPU and a validated 310.8 runtime build."));
+	int placementItem = static_cast<int>(std::min(placement, kMaxPlacement));
+	const std::array<const char*, kMaxPlacement + 1> placementLabels{
+		T(TKEY("placement_before"), "Before upscaling"),
+		T(TKEY("placement_final"), "Final image"),
+	};
+	if (ImGui::Combo(T(TKEY("placement"), "Placement"), &placementItem, placementLabels.data(), static_cast<int>(placementLabels.size()))) {
+		placement = static_cast<uint32_t>(placementItem);
+		resetHistory = true;
+	}
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted(T(TKEY("placement_tooltip"),
+			"Before upscaling: on the render-resolution scene before DLSS, as Open Shaders does; only brightness and luminance detail change, and DLSS and the grading run on top. Final image: after upscaling and tone mapping, on the frame DLSS frame generation receives without the UI, at output resolution; the model's result is shown as it is, colour included, and costs more GPU time. The final image needs DLSS frame generation and SDR output."));
+	if (placement == static_cast<uint32_t>(Placement::kFinalImage)) {
+		if (const char* unavailable = FinalImageUnavailableReason())
+			Util::Text::WrappedWarning(T(TKEY("placement_final_unavailable"), "Final image is unavailable (%s), so Neural Rendering runs before upscaling."), unavailable);
+	}
+	float mixPercent = std::clamp(mix, 0.0f, 1.0f) * 100.0f;
+	if (ImGui::SliderFloat(T(TKEY("mix"), "Mix"), &mixPercent, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
+		mix = mixPercent / 100.0f;
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted(T(TKEY("mix_tooltip"),
+			"How much of Neural Rendering's result is shown: 0% leaves the frame as it was, 100% shows all of it. It changes what is shown, not the GPU time."));
 	int style = static_cast<int>(std::min(tuning.style, NR::Tuning::kMaxStyle));
 	const std::array<const char*, NR::Tuning::kMaxStyle + 1> styleLabels{
 		T(TKEY("style_0"), "Style 0"),
@@ -1728,10 +2047,25 @@ void NeuralRendering::CaptureAfterUpscaling()
 	diagnostics.FinishCapture(globals::state->frameCount);
 }
 
-void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize)
+void NeuralRendering::DrawBeforeUpscaling(bool enabled, Placement placement, float mix, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize)
 {
 	using Outcome = NR::Diagnostics::Outcome;
-	enabled = ApplyTestCycle(enabled);
+	// Last frame's final-image request is still here when DLSS-G's compose pass never ran it.
+	if (std::exchange(finalRequest.pending, false) && finalMissed++ == 0)
+		logger::info("[NeuralRendering] final-image pass skipped on frame {}: DLSS-G did not compose that frame", finalRequest.frame);
+	enabled = ApplyTestCycle(enabled, placement);
+	if (placement == Placement::kFinalImage) {
+		const char* unavailable = FinalImageUnavailableReason();
+		if (unavailable != finalUnavailableLogged) {
+			if (unavailable)
+				logger::warn("[NeuralRendering] final-image placement unavailable: {}; NR runs before upscaling", unavailable);
+			else if (finalUnavailableLogged)
+				logger::info("[NeuralRendering] final-image placement available again");
+			finalUnavailableLogged = unavailable;
+		}
+		if (unavailable)
+			placement = Placement::kBeforeUpscaling;
+	}
 	const auto context = NR::Context::Resolve(contexts, DialogueOpen(), contextState);
 	auto& diagnostic = diagnostics.BeginHook(globals::state->frameCount, target);
 	const auto action = NR::DecideFrame({ enabled, context.suspended, globals::state->worldRenderedThisFrame, impl->failed,
@@ -1832,6 +2166,36 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 			work.materialAlphaShader.Reset();
 			work.sceneKeyReduce.Reset();
 			work.sceneKeyAdapt.Reset();
+			work.finalPrepare.Reset();
+			work.finalComposite.Reset();
+		}
+		work.mix = std::clamp(mix, 0.0f, 1.0f);
+		if (placement == Placement::kFinalImage) {
+			// The other placement's resources go once; the final-image pass makes its own at output size.
+			if (work.HasBeforeUpscalingResources())
+				work.ReleasePassResources();
+			diagnostic.outcome = Outcome::Bypassed;
+			// Menus and pauses skip DLSS-G's preparation, and with it this frame's final image.
+			if (!globals::features::upscaling.ShouldPrepareFrameGeneration())
+				return;
+			auto boundedTuning = effective;
+			boundedTuning.Sanitize();
+			if (diagnostic.options & NR::Diagnostics::DisableTone)
+				boundedTuning.localToneStrength = 0.0f;
+			if (diagnostic.options & NR::Diagnostics::DisableStructure)
+				boundedTuning.localStructureStrength = 0.0f;
+			if (diagnostic.options & NR::Diagnostics::DisableSkin)
+				boundedTuning.skinStructureStrength = NR::Tuning::kAutomaticSkinStructure;
+			finalRequest.pending = true;
+			finalRequest.frame = state->frameCount;
+			finalRequest.renderWidth = NR::EyeRenderWidth(static_cast<uint32_t>(renderSize.x), 1);
+			finalRequest.renderHeight = static_cast<uint32_t>(renderSize.y);
+			finalRequest.reset = resetHistory.exchange(false) ? NR::Diagnostics::Requested : 0u;
+			finalRequest.options = diagnostic.options;
+			finalRequest.mix = work.mix;
+			finalRequest.tuning = boundedTuning;
+			work.lastFrame = state->frameCount;
+			return;
 		}
 		auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 		auto* color = Util::AsReal(targets[RE::RENDER_TARGETS::kMAIN].texture);
@@ -1941,7 +2305,7 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 		const auto testCapture = testCaptureFrames.load(std::memory_order_relaxed);
 		if (testCapture && appliedFrames.load(std::memory_order_relaxed) >= testCaptureAt) {
 			testCaptureAt = UINT32_MAX;
-			if (work.StartTestCapture(testCapture))
+			if (work.StartTestCapture(testCapture, work.original->resource.get(), work.eyes[0].resolved->resource.get(), "test"))
 				logger::info("[NeuralRendering] test capture: the next {} frames, before and after NR", testCapture);
 			else
 				logger::warn("[NeuralRendering] test capture skipped: its copy textures could not be created");
@@ -1964,11 +2328,12 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 		diagnostics.RecordFrame(frameResets, diagnostic.resetDrainMs);
 		lastNgxResult[0].store(diagnostic.result[0], std::memory_order_relaxed);
 		lastNgxResult[1].store(diagnostic.result[1], std::memory_order_relaxed);
-		if (publishedState.load(std::memory_order_relaxed) != Status::State::kActive) {
+		if (publishedState.load(std::memory_order_relaxed) != Status::State::kActive || activePlacement != Placement::kBeforeUpscaling) {
+			activePlacement = Placement::kBeforeUpscaling;
 			const auto runtime = work.runtime.Version();
 			const auto luid = work.interop.AdapterLuid();
-			PublishStatus(Status::State::kActive, FormatActiveStatus(runtime));
-			logger::info("[NeuralRendering] active: runtime {} on adapter LUID {:08X}:{:08X}", runtime, luid.HighPart, luid.LowPart);
+			PublishStatus(Status::State::kActive, FormatActiveStatus(runtime, false));
+			logger::info("[NeuralRendering] active before upscaling: runtime {} on adapter LUID {:08X}:{:08X}", runtime, luid.HighPart, luid.LowPart);
 			// Every start, at load or switched back on, gets its own test capture once the history settles.
 			if (testCaptureFrames.load(std::memory_order_relaxed))
 				testCaptureAt = appliedFrames.load(std::memory_order_relaxed) + kTestCaptureAfterFrames;
@@ -1993,6 +2358,73 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 		LatchFailure();
 		PublishFailure(error.what());
 		logger::error("[NeuralRendering] {}", error.what());
+	}
+}
+
+void NeuralRendering::DrawOnFinalImage(ID3D11Texture2D* a_hudless, ID3D11UnorderedAccessView* a_hudlessUAV, ID3D11ShaderResourceView* a_depth, ID3D11ShaderResourceView* a_motion)
+{
+	if (!finalRequest.pending)
+		return;
+	const auto request = finalRequest;
+	finalRequest.pending = false;
+	if (!a_hudless || !a_hudlessUAV || !a_depth || !a_motion || !impl->ready || impl->failed)
+		return;
+	try {
+		auto& work = *impl;
+		D3D11_TEXTURE2D_DESC desc{};
+		a_hudless->GetDesc(&desc);
+		const bool forceRecreate = recreate.exchange(false);
+		const auto& pass = work.finalImage;
+		const bool recreated = forceRecreate || pass.width != desc.Width || pass.height != desc.Height || pass.format != desc.Format;
+		work.EnsureFinalResources(desc.Width, desc.Height, desc.Format, forceRecreate);
+		if (recreated)
+			PublishResources();
+		// A gap since the pass last ran (a menu, a placement switch) starts a fresh history, as before upscaling.
+		const uint32_t reset = request.reset | NR::Diagnostics::FrameResetReasons(false, pass.lastFrame, request.frame);
+		const auto testCapture = testCaptureFrames.load(std::memory_order_relaxed);
+		if (testCapture && appliedFrames.load(std::memory_order_relaxed) >= testCaptureAt) {
+			testCaptureAt = UINT32_MAX;
+			if (work.StartTestCapture(testCapture, pass.original->resource.get(), a_hudless, "final"))
+				logger::info("[NeuralRendering] test capture: the next {} frames, before and after NR on the final image", testCapture);
+			else
+				logger::warn("[NeuralRendering] test capture skipped: its copy textures could not be created");
+		}
+		work.mix = request.mix;
+		bool processed = false;
+		{
+			const PassTimer::Scope timing(work.finalPassTimer);
+			processed = work.DrawFinal(a_hudless, a_hudlessUAV, a_depth, a_motion, request.renderWidth, request.renderHeight, reset, request.options, request.tuning, request.frame);
+		}
+		if (work.TestCaptureComplete())
+			work.WriteTestCapture(diagnostics);
+		if (!processed)
+			throw std::runtime_error(std::format("the NVIDIA runtime failed to process a frame. Update the GPU driver, then press Retry (NGX 0x{:08X})", pass.frame.result));
+		if (finalMissed) {
+			logger::info("[NeuralRendering] final-image pass resumed after {} skipped frames", finalMissed);
+			finalMissed = 0;
+		}
+		appliedFrame.store(request.frame, std::memory_order_relaxed);
+		appliedFrames.fetch_add(1, std::memory_order_relaxed);
+		lastNgxResult[0].store(pass.frame.result, std::memory_order_relaxed);
+		lastNgxResult[1].store(0, std::memory_order_relaxed);
+		if (publishedState.load(std::memory_order_relaxed) != Status::State::kActive || activePlacement != Placement::kFinalImage) {
+			activePlacement = Placement::kFinalImage;
+			const auto runtime = work.runtime.Version();
+			PublishStatus(Status::State::kActive, FormatActiveStatus(runtime, true));
+			logger::info("[NeuralRendering] active on the final image: runtime {}, {}x{} from a {}x{} render", runtime, pass.width, pass.height,
+				request.renderWidth, request.renderHeight);
+			// Every start gets its own test capture once the history settles, as before upscaling.
+			if (testCaptureFrames.load(std::memory_order_relaxed))
+				testCaptureAt = appliedFrames.load(std::memory_order_relaxed) + kTestCaptureAfterFrames;
+		}
+	} catch (const winrt::hresult_error& error) {
+		LatchFailure();
+		PublishFailure(winrt::to_string(error.message()));
+		logger::error("[NeuralRendering] final-image pass failed: 0x{:08X}", static_cast<uint32_t>(error.code().value));
+	} catch (const std::exception& error) {
+		LatchFailure();
+		PublishFailure(error.what());
+		logger::error("[NeuralRendering] final-image pass failed: {}", error.what());
 	}
 }
 

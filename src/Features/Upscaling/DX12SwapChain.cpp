@@ -486,6 +486,12 @@ bool DX12SwapChain::ComposeDLSSGFrame()
 
 	d3d11Context->CopyResource(hudlessBufferWrapped->resource11, swapChainBufferWrapped->resource11);
 
+	// Neural Rendering's final-image placement edits the HUD-less frame here, before the UI goes on top, so
+	// the presented frame and DLSS-G's generated frames both carry it. A no-op unless NR scheduled it.
+	auto& upscaling = globals::features::upscaling;
+	if (upscaling.frameGenerationPrepared && depthBufferShared12 && motionVectorBufferShared12)
+		upscaling.neuralRendering.DrawOnFinalImage(hudlessBufferWrapped->resource11, hudlessBufferWrapped->uav, depthBufferShared12->srv, motionVectorBufferShared12->srv);
+
 	ID3D11ShaderResourceView* srvs[2] = { hudlessBufferWrapped->srv, uiBufferWrapped->srv };
 	d3d11Context->CSSetShaderResources(0, 2, srvs);
 	d3d11Context->CSSetUnorderedAccessViews(0, 1, &swapChainBufferWrapped->uav, nullptr);

@@ -55,11 +55,14 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	reflexUseFPSLimit,
 	reflexFPSLimit,
 	neuralRenderingEnabled,
+	neuralRenderingPlacement,
+	neuralRenderingMix,
 	neuralRenderingContexts,
 	neuralRenderingTuning,
 	neuralRenderingTestCaptureFrames,
 	neuralRenderingUnitExposure,
-	neuralRenderingTestCycleSeconds);
+	neuralRenderingTestCycleSeconds,
+	neuralRenderingTestCyclePlacements);
 
 decltype(&D3D11CreateDeviceAndSwapChain) ptrD3D11CreateDeviceAndSwapChainUpscaling;
 
@@ -548,7 +551,7 @@ void Upscaling::DrawSettings()
 	}
 
 	if (!globals::game::isVR && ImGui::TreeNodeEx(T(TKEY("neural_rendering_node"), "Neural Rendering (DLSS 5, experimental)"))) {
-		neuralRendering.DrawSettings(settings.neuralRenderingEnabled, settings.neuralRenderingContexts, settings.neuralRenderingTuning);
+		neuralRendering.DrawSettings(settings.neuralRenderingEnabled, settings.neuralRenderingPlacement, settings.neuralRenderingMix, settings.neuralRenderingContexts, settings.neuralRenderingTuning);
 		ImGui::TreePop();
 	}
 
@@ -651,10 +654,12 @@ void Upscaling::LoadSettings(json& o_json)
 	settings = o_json;
 	settings.neuralRenderingTuning.Sanitize();
 	settings.neuralRenderingContexts.Sanitize();
+	settings.neuralRenderingPlacement = std::min(settings.neuralRenderingPlacement, NeuralRendering::kMaxPlacement);
+	settings.neuralRenderingMix = std::isfinite(settings.neuralRenderingMix) ? std::clamp(settings.neuralRenderingMix, 0.0f, 1.0f) : 1.0f;
 	neuralRendering.ResetHistory();
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
-	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds);
+	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements);
 
 	// Sanitize loaded settings to ensure enum indices are valid
 	constexpr auto enumCount = 4;  // UpscaleMethod has 4 values: kNONE, kTAA, kFSR, kDLSS
@@ -701,7 +706,7 @@ void Upscaling::RestoreDefaultSettings()
 	neuralRendering.ResetHistory();
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
-	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds);
+	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements);
 }
 
 void Upscaling::ToggleNeuralRendering()
@@ -2310,9 +2315,11 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	auto upscaleMethod = upscaling.GetUpscaleMethod();
 
 	// Neural Rendering runs on the render-resolution scene before frame-generation capture and
-	// DLSS/FSR, as in Open Shaders, so both see the NR frame. It is a no-op while disabled.
+	// DLSS/FSR, as in Open Shaders, so both see the NR frame. In the final-image placement it only
+	// starts up and schedules here, and runs from DLSS-G's compose pass. It is a no-op while disabled.
 	const auto nrRenderSize = Util::ConvertToDynamic(globals::state->screenSize);
-	upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrRenderSize);
+	upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.GetNeuralRenderingPlacement(), upscaling.settings.neuralRenderingMix,
+		upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrRenderSize);
 	upscaling.neuralRendering.CaptureBeforeUpscaling();
 
 	upscaling.frameGenerationPrepared = false;

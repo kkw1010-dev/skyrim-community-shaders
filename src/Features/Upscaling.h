@@ -82,6 +82,10 @@ public:
 		float reflexFPSLimit = 60.0f;
 		// DLSS Neural Rendering (NGX Feature 18), ported from Open Shaders; off until the user enables it.
 		bool neuralRenderingEnabled = false;
+		// Where NR runs: 0 before upscaling (Open Shaders' placement), 1 on the final image (NeuralRendering::Placement).
+		uint32_t neuralRenderingPlacement = 0;
+		// Share of NR's result shown, 0 to 1.
+		float neuralRenderingMix = 1.0f;
 		NR::Context::Profiles neuralRenderingContexts;
 		NR::Tuning neuralRenderingTuning;
 		// Test aid: frames of the once-per-session before/after NR capture (0 = off, at most 8).
@@ -90,7 +94,15 @@ public:
 		bool neuralRenderingUnitExposure = false;
 		// Test aid: with the test capture on, NR switches itself on and off in turns of this many seconds (0 = off, at least 10).
 		uint32_t neuralRenderingTestCycleSeconds = 0;
+		// Test aid: the test cycle's NR turns alternate before upscaling and the final image.
+		bool neuralRenderingTestCyclePlacements = false;
 	};
+
+	/** @brief The saved NR placement, clamped to a known one. */
+	NeuralRendering::Placement GetNeuralRenderingPlacement() const
+	{
+		return static_cast<NeuralRendering::Placement>(std::min(settings.neuralRenderingPlacement, NeuralRendering::kMaxPlacement));
+	}
 
 	Settings settings;
 
@@ -257,7 +269,7 @@ public:
 	static inline DX12SwapChain dx12SwapChain;
 	static inline RCAS rcas;  ///< Standalone RCAS sharpening for DLSS
 
-	NeuralRendering neuralRendering;  ///< DLSS Neural Rendering before upscaling (opt-in)
+	NeuralRendering neuralRendering;  ///< DLSS Neural Rendering, before upscaling or on the final image (opt-in)
 
 	winrt::com_ptr<ID3D11PixelShader> copyDepthToSharedBufferPS;
 
