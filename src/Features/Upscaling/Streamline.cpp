@@ -783,8 +783,9 @@ void Streamline::UpdateReflex()
 
 	sl::ReflexOptions options{};
 	if (renderAPI == sl::RenderAPI::eD3D12) {
-		// DX12 Reflex: DLSS-G requires at least eLowLatency when FG is active
-		bool needReflex = upscaling.ShouldPrepareFrameGeneration() || settings.reflexLowLatencyMode;
+		// DX12 Reflex: DLSS-G requires at least eLowLatency when FG is active. It follows the menu state, not
+		// the hold after a menu or a load, so its markers already flow when DLSS-G comes back (F001).
+		bool needReflex = upscaling.FrameGenerationPermitted() || settings.reflexLowLatencyMode;
 		if (needReflex)
 			options.mode = settings.reflexLowLatencyBoost ? sl::ReflexMode::eLowLatencyWithBoost : sl::ReflexMode::eLowLatency;
 		else

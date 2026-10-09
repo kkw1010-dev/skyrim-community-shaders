@@ -6,6 +6,7 @@
 #include <wrl\client.h>
 #include <wrl\wrappers\corewrappers.h>
 
+#include <chrono>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <string>
@@ -33,17 +34,39 @@ public:
 struct SharedFence
 {
 	static constexpr DWORD kRemovalPollMs = 100;
+	/** @brief Longest a CPU wait may take before its caller treats the GPU work as stuck. */
+	static constexpr DWORD kFenceTimeoutMs = 5000;
 	winrt::com_ptr<ID3D12Fence> fence12;
 	winrt::com_ptr<ID3D11Fence> fence11;
 	uint64_t value = 0;
+
+	/** @brief How a CPU wait ended. */
+	enum class WaitOutcome : uint8_t
+	{
+		kComplete,  ///< The fence reached the value, or there was nothing to wait for.
+		kTimeout,   ///< The value did not complete within the timeout.
+		kFailed     ///< The wait could not be set up, or the device was removed.
+	};
 
 	/** @brief Returns the next value to signal, advancing the monotonic counter. */
 	uint64_t Next() { return ++value; }
 	/** @brief Creates and names the fence; throws on failure without leaking the NT handle. */
 	void Create(ID3D12Device* a_device12, ID3D11Device5* a_device11, const char* a_name);
+	/** @brief Releases both views of the fence and restarts the counter, for an owner tearing its device down. */
+	void Reset()
+	{
+		fence11 = nullptr;
+		fence12 = nullptr;
+		value = 0;
+	}
 	/** @brief Waits on the CPU up to a_timeoutMs, polling device removal via fence12's own device.
 	 *  Trivially true when the fence is unset or a_value is 0 (nothing to wait for). */
 	bool CpuWait(uint64_t a_value, DWORD a_timeoutMs) const;
+	/**
+	 * @brief CpuWait that reports why it ended. a_error, when given, receives the Win32 error or the
+	 *        device-removed HRESULT behind a kFailed, and 0 otherwise.
+	 */
+	WaitOutcome CpuWaitOutcome(uint64_t a_value, DWORD a_timeoutMs, DWORD* a_error = nullptr) const;
 };
 
 struct DXGISwapChainProxy : IDXGISwapChain
@@ -117,6 +140,24 @@ public:
 	UINT frameIndex = 0;
 
 	UINT64 frameFenceValues[kMaxBackBuffers] = {};
+
+	/** @brief First wait for a back buffer slot's previous frame; a normal frame finishes in a few milliseconds. */
+	static constexpr DWORD kFrameSlotWaitMs = 1000;
+	/** @brief Second wait, after DLSS-G was switched off to release whatever holds the queue. */
+	static constexpr DWORD kFrameSlotRecoveryMs = 4000;
+	/** @brief Wait per Present while frames are being skipped, so the main thread keeps running. */
+	static constexpr DWORD kFrameSlotRetryMs = 100;
+	/** @brief How long frame generation stays off after a stalled frame. */
+	static constexpr std::chrono::milliseconds kStallFrameGenerationHold{ 3000 };
+	/** @brief Presents skipped in a row because the slot's previous frame was still on the GPU. */
+	uint32_t skippedFrames = 0;
+	/**
+	 * @brief Waits, bounded, until the current slot's previous frame is off the GPU, so its allocator can be reused.
+	 *        A slow first wait switches DLSS-G off and holds it, then waits once more; if the GPU still has not
+	 *        finished, the frame is skipped with a logged error instead of blocking the main thread forever.
+	 * @return False when this frame must be skipped.
+	 */
+	bool WaitForFrameSlot();
 
 	LARGE_INTEGER qpf;
 

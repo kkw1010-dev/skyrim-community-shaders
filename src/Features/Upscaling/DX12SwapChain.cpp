@@ -358,9 +358,14 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 	DX::ThrowIfFailed(d3d11Context->Signal(interopFence.fence11.get(), d3d11SignalValue));
 	DX::ThrowIfFailed(commandQueue->Wait(interopFence.fence12.get(), d3d11SignalValue));
 
-	// New frame, reset
-	if (frameFenceValues[frameIndex])
-		DX::ThrowIfFailed(interopFence.fence12->SetEventOnCompletion(frameFenceValues[frameIndex], nullptr));
+	// New frame, reset. The slot's previous frame must be off the GPU before its allocator is reused; an
+	// unbounded wait here froze the game without a TDR (F001), so a stuck queue now skips the frame instead.
+	if (!WaitForFrameSlot()) {
+		const float clearColor[4]{};
+		d3d11Context->ClearRenderTargetView(uiBufferWrapped->rtv, clearColor);
+		upscaling.frameGenerationPrepared = false;
+		return S_OK;
+	}
 	DX::ThrowIfFailed(commandAllocators[frameIndex]->Reset());
 	DX::ThrowIfFailed(commandLists[frameIndex]->Reset(commandAllocators[frameIndex].get(), nullptr));
 
@@ -408,12 +413,13 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 										 nullptr,
 				dlssgUIComposed ? uiBufferWrapped->resource.get() : nullptr,
 				swapChainDesc.Width, swapChainDesc.Height);
-			streamlineDX12.ConfigureDLSSG(upscaling.ShouldUseFrameGenerationThisFrame(), dlssgUIComposed);
+			// A stall earlier in this Present may have started the hold after this frame was prepared.
+			streamlineDX12.ConfigureDLSSG(upscaling.ShouldUseFrameGenerationThisFrame() && !upscaling.FrameGenerationHeld(), dlssgUIComposed);
 		} else {
 			streamlineDX12.ConfigureDLSSG(false, false);
 		}
 	} else {
-		upscaling.fidelityFX.Present(upscaling.ShouldUseFrameGenerationThisFrame(), isHDR);
+		upscaling.fidelityFX.Present(upscaling.ShouldUseFrameGenerationThisFrame() && !upscaling.FrameGenerationHeld(), isHDR);
 	}
 
 	DX::ThrowIfFailed(commandLists[frameIndex]->Close());
@@ -463,6 +469,40 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 	upscaling.frameGenerationPrepared = false;
 
 	return S_OK;
+}
+
+bool DX12SwapChain::WaitForFrameSlot()
+{
+	const uint64_t value = frameFenceValues[frameIndex];
+	if (!value)
+		return true;
+	auto& upscaling = globals::features::upscaling;
+	const auto completed = [this] { return interopFence.fence12 ? interopFence.fence12->GetCompletedValue() : 0; };
+	// Once frames are being skipped, each Present only looks briefly, so the main thread keeps running.
+	auto outcome = interopFence.CpuWaitOutcome(value, skippedFrames ? kFrameSlotRetryMs : kFrameSlotWaitMs);
+	if (outcome == SharedFence::WaitOutcome::kTimeout && !skippedFrames) {
+		// DLSS-G's present queue is the likeliest thing holding the frame: switch it off, keep it off, wait once more.
+		logger::warn("[DX12SwapChain] Back buffer slot {} not finished after {} ms (fence {}, completed {}); frame generation off for {} s",
+			frameIndex, kFrameSlotWaitMs, value, completed(), kStallFrameGenerationHold.count() / 1000.0);
+		if (useDLSSG)
+			upscaling.streamlineDX12.ConfigureDLSSG(false, false);
+		upscaling.HoldFrameGeneration(kStallFrameGenerationHold, "a frame the GPU did not finish");
+		outcome = interopFence.CpuWaitOutcome(value, kFrameSlotRecoveryMs);
+		if (outcome == SharedFence::WaitOutcome::kComplete)
+			logger::info("[DX12SwapChain] Back buffer slot {} finished within {} ms more", frameIndex, kFrameSlotRecoveryMs);
+	}
+	if (outcome == SharedFence::WaitOutcome::kComplete) {
+		if (skippedFrames) {
+			logger::info("[DX12SwapChain] Back buffer slot {} finished; presenting again after {} skipped frames", frameIndex, skippedFrames);
+			skippedFrames = 0;
+		}
+		return true;
+	}
+	if (++skippedFrames == 1 || skippedFrames % 60 == 0)
+		logger::error("[DX12SwapChain] Back buffer slot {} still not finished (fence {}, completed {}, wait {}); {} frame(s) skipped",
+			frameIndex, value, completed(), outcome == SharedFence::WaitOutcome::kTimeout ? "timed out" : "failed", skippedFrames);
+	upscaling.HoldFrameGeneration(kStallFrameGenerationHold, "a frame the GPU did not finish");
+	return false;
 }
 
 bool DX12SwapChain::CanComposeDLSSGFrame()
@@ -707,16 +747,28 @@ void SharedFence::Create(ID3D12Device* a_device12, ID3D11Device5* a_device11, co
 
 bool SharedFence::CpuWait(uint64_t a_value, DWORD a_timeoutMs) const
 {
+	return CpuWaitOutcome(a_value, a_timeoutMs) == WaitOutcome::kComplete;
+}
+
+SharedFence::WaitOutcome SharedFence::CpuWaitOutcome(uint64_t a_value, DWORD a_timeoutMs, DWORD* a_error) const
+{
+	const auto fail = [a_error](DWORD a_code) {
+		if (a_error)
+			*a_error = a_code;
+		return WaitOutcome::kFailed;
+	};
+	if (a_error)
+		*a_error = 0;
 	if (!fence12 || a_value == 0)
-		return true;
+		return WaitOutcome::kComplete;
 	if (fence12->GetCompletedValue() >= a_value)
-		return true;
+		return WaitOutcome::kComplete;
 
 	winrt::handle fenceEvent(CreateEventW(nullptr, FALSE, FALSE, nullptr));
 	if (!fenceEvent)
-		return false;
-	if (FAILED(fence12->SetEventOnCompletion(a_value, fenceEvent.get())))
-		return false;
+		return fail(GetLastError());
+	if (const HRESULT result = fence12->SetEventOnCompletion(a_value, fenceEvent.get()); FAILED(result))
+		return fail(static_cast<DWORD>(result));
 
 	winrt::com_ptr<ID3D12Device> device12;
 	DWORD waitedMs = 0;
@@ -724,17 +776,19 @@ bool SharedFence::CpuWait(uint64_t a_value, DWORD a_timeoutMs) const
 		const DWORD sliceMs = std::min<DWORD>(kRemovalPollMs, a_timeoutMs - waitedMs);
 		const DWORD waitResult = WaitForSingleObject(fenceEvent.get(), sliceMs);
 		if (waitResult == WAIT_OBJECT_0)
-			return true;
+			return WaitOutcome::kComplete;
 		if (waitResult != WAIT_TIMEOUT)
-			return false;
+			return fail(GetLastError());
 		waitedMs += sliceMs;
 		if (!device12)
 			fence12->GetDevice(IID_PPV_ARGS(&device12));
-		if (device12 && FAILED(device12->GetDeviceRemovedReason()))
-			return false;
+		if (device12) {
+			if (const HRESULT removed = device12->GetDeviceRemovedReason(); FAILED(removed))
+				return fail(static_cast<DWORD>(removed));
+		}
 	}
 
-	return false;
+	return WaitOutcome::kTimeout;
 }
 
 DXGISwapChainProxy::DXGISwapChainProxy(IDXGISwapChain4* a_swapChain)

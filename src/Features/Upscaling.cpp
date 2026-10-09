@@ -1707,12 +1707,54 @@ bool Upscaling::IsFrameGenerationActive() const
 	return fidelityFX.isFrameGenActive;
 }
 
-bool Upscaling::ShouldPrepareFrameGeneration() const
+bool Upscaling::FrameGenerationPermitted() const
 {
 	auto* ui = globals::game::ui;
 	auto* state = globals::state;
 	const bool menuOpen = (ui && ui->GameIsPaused()) || (state && state->IsMainOrLoadingMenuOpen(ui));
 	return IsFrameGenerationDx12PathActive() && settings.frameGenerationMode && (settings.frameGenerationAllowInMenus || !menuOpen);
+}
+
+bool Upscaling::ShouldPrepareFrameGeneration() const
+{
+	return FrameGenerationPermitted() && !FrameGenerationHeld();
+}
+
+void Upscaling::HoldFrameGeneration(std::chrono::milliseconds a_duration, const char* a_reason)
+{
+	const bool wasHeld = FrameGenerationHeld();
+	frameGenerationHoldUntil = std::max(frameGenerationHoldUntil, std::chrono::steady_clock::now() + a_duration);
+	frameGenerationHoldFrames = std::max(frameGenerationHoldFrames, kFrameGenerationHoldFrames);
+	if (!wasHeld && a_reason)
+		logger::info("[Upscaling] Frame generation held for {} ms: {}", a_duration.count(), a_reason);
+}
+
+bool Upscaling::FrameGenerationHeld() const
+{
+	return frameGenerationHoldFrames > 0 || std::chrono::steady_clock::now() < frameGenerationHoldUntil;
+}
+
+void Upscaling::UpdateFrameGenerationHold()
+{
+	// Post-processing can run twice in a frame; the frame count of the hold must not.
+	const uint32_t frame = globals::state ? globals::state->frameCount : 0;
+	if (frame == frameGenerationHoldUpdatedFrame)
+		return;
+	frameGenerationHoldUpdatedFrame = frame;
+	const auto now = std::chrono::steady_clock::now();
+	const bool afterGap = lastPostProcessingTime != std::chrono::steady_clock::time_point{} && now - lastPostProcessingTime > kFrameGenerationLoadingGap;
+	lastPostProcessingTime = now;
+	if (frameGenerationHoldFrames)
+		--frameGenerationHoldFrames;
+	if (!IsFrameGenerationDx12PathActive() || !settings.frameGenerationMode)
+		return;
+	// Reflex runs again from the frame the menu or load ends (Streamline::UpdateReflex); DLSS-G follows a second
+	// later. Turning both on in one frame logged eFailReflexNotDetectedAtRuntime on every re-enable, and two of the
+	// re-enables froze the game (F001).
+	if (!FrameGenerationPermitted())
+		HoldFrameGeneration(kFrameGenerationHold, nullptr);
+	else if (afterGap)
+		HoldFrameGeneration(kFrameGenerationHold, "after a loading screen or a long frame");
 }
 
 bool Upscaling::ShouldUseFrameGenerationThisFrame() const
@@ -2202,6 +2244,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 {
 	auto& upscaling = globals::features::upscaling;
 	auto upscaleMethod = upscaling.GetUpscaleMethod();
+	upscaling.UpdateFrameGenerationHold();
 
 	upscaling.frameGenerationPrepared = false;
 	if (upscaling.ShouldPrepareFrameGeneration()) {
