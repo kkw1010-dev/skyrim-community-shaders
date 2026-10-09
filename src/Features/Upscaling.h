@@ -133,14 +133,15 @@ public:
 	/** @brief Shortest hold after a loading screen or a menu, in time and in frames: both must pass. */
 	static constexpr std::chrono::milliseconds kFrameGenerationHold{ 1000 };
 	static constexpr uint32_t kFrameGenerationHoldFrames = 30;
-	/** @brief A gap this long between two post-processed frames is a loading screen (or a long hitch). */
-	static constexpr std::chrono::milliseconds kFrameGenerationLoadingGap{ 250 };
+	/**
+	 * @brief More presented frames than this between two post-processed ones are a loading screen (or another screen
+	 *        without the world); a slow gameplay frame is still one frame, so a hitch does not start the hold.
+	 */
+	static constexpr uint32_t kFrameGenerationLoadingGapFrames = 5;
 	/** @brief The hold lasts until this time and until frameGenerationHoldFrames more frames have been post-processed. */
 	std::chrono::steady_clock::time_point frameGenerationHoldUntil{};
 	uint32_t frameGenerationHoldFrames = 0;
-	/** @brief When post-processing last ran, to see a loading screen as a gap. */
-	std::chrono::steady_clock::time_point lastPostProcessingTime{};
-	/** @brief Engine frame UpdateFrameGenerationHold last ran in. */
+	/** @brief Engine frame UpdateFrameGenerationHold last ran in; a gap in the count is a loading screen. */
 	uint32_t frameGenerationHoldUpdatedFrame = UINT32_MAX;
 	/** @brief Returns the prepared frame's generation decision until its buffers are cleared after Present. */
 	bool ShouldUseFrameGenerationThisFrame() const;
