@@ -3,6 +3,7 @@
 #include <DDSTextureLoader.h>
 #include <DirectXTex.h>
 #include <charconv>
+#include "Utils/ResourceStream.h"
 
 bool Flowmap::TryGetFlowmap(RE::NiPointer<RE::NiSourceTexture>& outFlowmapTex) const
 {
@@ -229,6 +230,7 @@ bool Flowmap::GenerateFlowmap(bool useMips)
 			for (auto x = worldMinX; x < worldMaxX; ++x) {
 				auto path = std::format(R"(Textures\Water\skyrim.esm\flow.{}.{}.dds)", x, y);
 				auto stream = RE::BSResourceNiBinaryStream(path);
+				Util::BalanceStreamRelease(stream);
 
 				if (!stream.good())
 					continue;
