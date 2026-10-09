@@ -17,3 +17,6 @@ tests/shaders/*.exe
 tests/shaders/*.pdb
 tests/shaders/Shaders/
 tools/__pycache__/
+
+# NVIDIA DLSS Neural Rendering runtime: proprietary, personal use only, never in the repo or a package
+nvngx_dlssnr*.dll
