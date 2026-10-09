@@ -33,17 +33,39 @@ public:
 struct SharedFence
 {
 	static constexpr DWORD kRemovalPollMs = 100;
+	/** @brief Longest a CPU wait may take before its caller treats the GPU work as stuck. */
+	static constexpr DWORD kFenceTimeoutMs = 5000;
 	winrt::com_ptr<ID3D12Fence> fence12;
 	winrt::com_ptr<ID3D11Fence> fence11;
 	uint64_t value = 0;
+
+	/** @brief How a CPU wait ended. */
+	enum class WaitOutcome : uint8_t
+	{
+		kComplete,  ///< The fence reached the value, or there was nothing to wait for.
+		kTimeout,   ///< The value did not complete within the timeout.
+		kFailed     ///< The wait could not be set up, or the device was removed.
+	};
 
 	/** @brief Returns the next value to signal, advancing the monotonic counter. */
 	uint64_t Next() { return ++value; }
 	/** @brief Creates and names the fence; throws on failure without leaking the NT handle. */
 	void Create(ID3D12Device* a_device12, ID3D11Device5* a_device11, const char* a_name);
+	/** @brief Releases both views of the fence and restarts the counter, for an owner tearing its device down. */
+	void Reset()
+	{
+		fence11 = nullptr;
+		fence12 = nullptr;
+		value = 0;
+	}
 	/** @brief Waits on the CPU up to a_timeoutMs, polling device removal via fence12's own device.
 	 *  Trivially true when the fence is unset or a_value is 0 (nothing to wait for). */
 	bool CpuWait(uint64_t a_value, DWORD a_timeoutMs) const;
+	/**
+	 * @brief CpuWait that reports why it ended. a_error, when given, receives the Win32 error or the
+	 *        device-removed HRESULT behind a kFailed, and 0 otherwise.
+	 */
+	WaitOutcome CpuWaitOutcome(uint64_t a_value, DWORD a_timeoutMs, DWORD* a_error = nullptr) const;
 };
 
 struct DXGISwapChainProxy : IDXGISwapChain

@@ -142,6 +142,7 @@ target_link_libraries(
         Streamline
         d3d12.lib
         bcrypt.lib  # SHA-256 of the Neural Rendering runtime (Utils/FileDigest)
+        runtimeobject.lib  # RoOriginateLanguageException behind winrt::hresult_error (Neural Rendering)
         Microsoft::DirectX-Headers
         ${DETOURS_LIBRARY}
 )
