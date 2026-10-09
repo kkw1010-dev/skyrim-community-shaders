@@ -914,7 +914,27 @@ void State::BeginPerfEvent(std::string_view title)
 	const TracyCZoneCtx ctx = ___tracy_emit_zone_begin_alloc(srcloc, true);
 	s_tracyPerfZones.push_back(ctx);
 #endif
+	{
+		std::scoped_lock lock(perfBreadcrumbMutex);
+		auto& crumb = perfBreadcrumbs[perfBreadcrumbCount++ % perfBreadcrumbs.size()];
+		crumb.frame = frameCount;
+		const auto length = std::min(title.size(), sizeof(crumb.title) - 1);
+		std::memcpy(crumb.title, title.data(), length);
+		crumb.title[length] = '\0';
+	}
 	pPerf->BeginEvent(std::wstring(title.begin(), title.end()).c_str());
+}
+
+std::string State::DescribeRecentPerfEvents()
+{
+	std::scoped_lock lock(perfBreadcrumbMutex);
+	std::string text;
+	const auto kept = std::min(perfBreadcrumbCount, perfBreadcrumbs.size());
+	for (size_t i = perfBreadcrumbCount - kept; i < perfBreadcrumbCount; ++i) {
+		const auto& crumb = perfBreadcrumbs[i % perfBreadcrumbs.size()];
+		text += std::format("\n    frame {}: {}", crumb.frame, crumb.title);
+	}
+	return text.empty() ? std::string(" none") : text;
 }
 
 void State::EndPerfEvent()

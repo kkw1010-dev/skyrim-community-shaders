@@ -398,6 +398,85 @@ namespace globals
 	};
 
 	/**
+	 * @brief Watches GetData without changing it (vtable index 29), so a GPU that stops answering is logged (F002).
+	 *
+	 * The engine waits for each frame's event query with GetData in a 1 ms sleep loop that never gives up and
+	 * treats an error like "not ready" (SkyrimSE.exe 77271). After a GPU fault it spins there forever with no
+	 * crash, no TDR and no log line. This logs, once, the first device-loss result with the device's removed
+	 * reason, and the first kMaxStallReports polls of one query that is still unfinished after kStallMs, with
+	 * the perf events CS began last. The result is always returned as the runtime gave it.
+	 */
+	struct ID3D11DeviceContext_GetData
+	{
+		static constexpr ULONGLONG kStallMs = 2000;
+		static constexpr uint32_t kMaxStallReports = 3;
+
+		static HRESULT STDMETHODCALLTYPE thunk(ID3D11DeviceContext* This, ID3D11Asynchronous* pAsync, void* pData, UINT DataSize, UINT GetDataFlags)
+		{
+			const HRESULT hr = func(This, pAsync, pData, DataSize, GetDataFlags);
+			// Per thread: the query this thread last saw unfinished, since when, and whether that wait was reported.
+			thread_local ID3D11Asynchronous* pending = nullptr;
+			thread_local ULONGLONG pendingSince = 0;
+			thread_local bool pendingReported = false;
+			if (hr == S_FALSE) {
+				const ULONGLONG now = GetTickCount64();
+				if (pAsync != pending) {
+					pending = pAsync;
+					pendingSince = now;
+					pendingReported = false;
+				} else if (!pendingReported && now - pendingSince >= kStallMs) {
+					pendingReported = true;
+					ReportStall(pAsync, GetDataFlags, now - pendingSince);
+				}
+			} else {
+				pending = nullptr;
+				if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR)
+					ReportDeviceLoss(hr);
+			}
+			return hr;
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+
+	private:
+		static inline std::atomic<uint32_t> stallReports{ 0 };
+		static inline std::atomic_bool deviceLossReported{ false };
+
+		static HRESULT RemovedReason()
+		{
+			return globals::d3d::device ? globals::d3d::device->GetDeviceRemovedReason() : E_POINTER;
+		}
+
+		static void ReportStall(ID3D11Asynchronous* a_async, UINT a_flags, ULONGLONG a_waitedMs)
+		{
+			const auto report = stallReports.fetch_add(1);
+			if (report >= kMaxStallReports)
+				return;
+			std::string kind = "not a query";
+			winrt::com_ptr<ID3D11Query> query;
+			if (a_async && SUCCEEDED(a_async->QueryInterface(IID_PPV_ARGS(query.put())))) {
+				D3D11_QUERY_DESC desc{};
+				query->GetDesc(&desc);
+				kind = std::format("{} ({})", magic_enum::enum_name(desc.Query), static_cast<int>(desc.Query));
+			}
+			logger::error("[GPU watch] GetData on thread {} has waited {} ms for one {} (flags {:#x}); device removed reason {:#010x}, frame {}{}. "
+						  "CS perf events begun last (the GPU may be a few frames behind them):{}",
+				GetCurrentThreadId(), a_waitedMs, kind, a_flags, static_cast<uint32_t>(RemovedReason()),
+				globals::state ? globals::state->frameCount : 0u, report + 1 == kMaxStallReports ? "; later stalls are not logged" : "",
+				globals::state ? globals::state->DescribeRecentPerfEvents() : std::string(" none"));
+		}
+
+		static void ReportDeviceLoss(HRESULT a_result)
+		{
+			if (deviceLossReported.exchange(true))
+				return;
+			logger::error("[GPU watch] GetData returned {:#010x} on thread {}; device removed reason {:#010x}, frame {}. CS perf events begun last:{}",
+				static_cast<uint32_t>(a_result), GetCurrentThreadId(), static_cast<uint32_t>(RemovedReason()),
+				globals::state ? globals::state->frameCount : 0u,
+				globals::state ? globals::state->DescribeRecentPerfEvents() : std::string(" none"));
+		}
+	};
+
+	/**
  * @brief Installs hooks on the Map and Unmap methods of the provided D3D11 device context.
  *
  * This enables interception of resource mapping and unmapping operations for frame buffer caching.
@@ -406,6 +485,7 @@ namespace globals
 	{
 		stl::detour_vfunc<14, ID3D11DeviceContext_Map>(a_context);
 		stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(a_context);
+		stl::detour_vfunc<29, ID3D11DeviceContext_GetData>(a_context);
 
 		// VR stereo optimization hooks: installed only when stereo reprojection is enabled at startup.
 		// Changing stereoMode at runtime requires a restart; the UI communicates this to the user.

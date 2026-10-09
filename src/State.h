@@ -5,6 +5,7 @@
 #include <Tracy/TracyD3D11.hpp>
 
 #include <Buffer.h>
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -144,6 +145,11 @@ public:
 	void BeginPerfEvent(std::string_view title);
 	void EndPerfEvent();
 	void SetPerfMarker(std::string_view title);
+	/**
+	 * @brief The perf events begun last, oldest first, one "frame N: title" line each, for a GPU stall report.
+	 *        They are what the CPU recorded last; the GPU may still be a few frames behind them.
+	 */
+	std::string DescribeRecentPerfEvents();
 
 	void SetAdapterDescription(const std::wstring& description);
 
@@ -360,4 +366,14 @@ public:
 private:
 	std::shared_ptr<REX::W32::ID3DUserDefinedAnnotation> pPerf;
 	std::mutex statsMutex;
+
+	/** @brief One begun perf event, kept for DescribeRecentPerfEvents. */
+	struct PerfBreadcrumb
+	{
+		uint frame = 0;
+		char title[64]{};
+	};
+	std::array<PerfBreadcrumb, 16> perfBreadcrumbs{};
+	size_t perfBreadcrumbCount = 0;
+	std::mutex perfBreadcrumbMutex;
 };
