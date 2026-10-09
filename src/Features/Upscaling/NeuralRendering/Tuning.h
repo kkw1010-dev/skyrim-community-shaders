@@ -18,6 +18,8 @@ namespace NR
 		static constexpr uint32_t kRegionFitPadded = 0, kRegionFitTight = 1, kMaxRegionFit = kRegionFitTight;
 		/** @brief How the before-upscaling pass carries the scene to NR and back (ColorTransferCS ToneTransfer). */
 		static constexpr uint32_t kToneTransferGain = 0, kToneTransferAces = 1, kMaxToneTransfer = kToneTransferAces;
+		/** @brief Bounds of finalScale: below half the output the edit loses too much of its structure. */
+		static constexpr float kMinFinalScale = 0.5f, kMaxFinalScale = 1.0f;
 		uint32_t style = 0;
 		float intensity = kDefaultStrength;
 		float localToneStrength = kDefaultStrength;
@@ -36,6 +38,12 @@ namespace NR
 		 *        colour back, and the original HDR is kept in the highlights (dxvk-remix / Dagor).
 		 */
 		uint32_t toneTransfer = kToneTransferGain;
+		/**
+		 * @brief Final-image placement: the model's working size as a share of the output size per axis. Below 1
+		 *        the model runs on a downscaled copy and only its edit is upscaled onto the full frame
+		 *        (base + up(NR(low)) - up(low)); its cost falls with the pixel count (0.75 = 56 %).
+		 */
+		float finalScale = kMaxFinalScale;
 		/**
 		 * @brief Restricts NR's evaluation to a crop around the most prominent visible actor.
 		 *        Off by default: it trades full-frame NR quality for GPU time, and the
@@ -136,6 +144,7 @@ namespace NR
 		{
 			style = std::min(style, kMaxStyle);
 			toneTransfer = std::min(toneTransfer, kMaxToneTransfer);
+			finalScale = std::isfinite(finalScale) ? std::clamp(finalScale, kMinFinalScale, kMaxFinalScale) : kMaxFinalScale;
 			regionFit = std::min(regionFit, kMaxRegionFit);
 			for (auto* strength : { &intensity, &localToneStrength, &localStructureStrength,
 					 &skinToneStrength, &hairToneStrength, &eyeToneStrength, &foliageToneStrength, &landscapeToneStrength })

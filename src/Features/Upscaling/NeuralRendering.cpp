@@ -113,6 +113,23 @@ namespace
 		{ "aces-skin050-nodepth", 0.5f, NR::Tuning::kToneTransferAces, true },
 	};
 
+	/** @brief One run of the working-scale test cycle (run set 7): NR on the final image at this share of the output. */
+	struct TestCycleScale
+	{
+		const char* name;
+		float scale;
+		float skinStructure;
+	};
+	// Skin 0.5 is the user's play setting; the last run repeats full size with Auto (-1), to see whether the
+	// skin value reaches the final image at all.
+	constexpr TestCycleScale kTestCycleScales[] = {
+		{ "final-s100", 1.0f, 0.5f },
+		{ "final-s085", 0.85f, 0.5f },
+		{ "final-s075", 0.75f, 0.5f },
+		{ "final-s060", 0.6f, 0.5f },
+		{ "final-s100-skinauto", 1.0f, NR::Tuning::kAutomaticSkinStructure },
+	};
+
 	/**
 	 * @brief Runtime feature slot the final-image placement evaluates in: the second eye's, which flat
 	 *        rendering never uses. Its own NGX feature keeps the output-resolution history apart.
@@ -284,17 +301,21 @@ struct NeuralRendering::Impl
 		std::unique_ptr<Texture2D> original;
 		NR::FrameParameters frame;
 		DirectX::SimpleMath::Vector3 position{}, forward{};
-		uint32_t width = 0, height = 0;
+		/** @brief The model's working size (color, guides, output) and the HUD-less frame's size (original). */
+		uint32_t width = 0, height = 0, outputWidth = 0, outputHeight = 0;
 		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 		/** @brief Engine frame the pass last ran on; a gap resets the history. */
 		uint32_t lastFrame = UINT32_MAX;
 	} finalImage;
-	/** @brief FinalImageCS.hlsl cbuffer: the output and rendered sizes and the share of NR shown. */
+	/** @brief Bilinear clamp sampler: the final image's downscale into the working size and the edit's upscale. */
+	winrt::com_ptr<ID3D11SamplerState> finalSampler;
+	/** @brief FinalImageCS.hlsl cbuffer: the output, rendered and working sizes and the share of NR shown. */
 	struct alignas(16) FinalImageData
 	{
 		uint32_t outputWidth, outputHeight, renderWidth, renderHeight;
 		float mix;
-		float3 pad{};
+		uint32_t workWidth, workHeight;
+		float pad = 0.0f;
 	};
 	static_assert(sizeof(FinalImageData) == 32);
 	std::unique_ptr<ConstantBuffer> finalImageBuffer;
@@ -530,14 +551,24 @@ struct NeuralRendering::Impl
 	/** @brief True while the before-upscaling placement's resources exist. */
 	bool HasBeforeUpscalingResources() const { return eyeCount != 0; }
 
+	/** @brief The model's working size for an output size and a share of it per axis (NR::Tuning::finalScale). */
+	static std::pair<uint32_t, uint32_t> FinalWorkSize(uint32_t a_width, uint32_t a_height, float a_scale)
+	{
+		const auto scaled = [a_scale](uint32_t a_size) {
+			return std::min(std::max(static_cast<uint32_t>(std::lround(a_size * static_cast<double>(a_scale))), 16u), a_size);
+		};
+		return { scaled(a_width), scaled(a_height) };
+	}
+
 	/**
-	 * @brief Creates the final-image pass for an output size and format. A change releases every pass
-	 *        resource first, the runtime's features included, so the new size starts a fresh history.
+	 * @brief Creates the final-image pass for an output size, format and working scale. A change releases every
+	 *        pass resource first, the runtime's features included, so the new size starts a fresh history.
 	 */
-	void EnsureFinalResources(uint32_t w, uint32_t h, DXGI_FORMAT frameFormat, bool force)
+	void EnsureFinalResources(uint32_t w, uint32_t h, DXGI_FORMAT frameFormat, float scale, bool force)
 	{
 		auto& pass = finalImage;
-		if (!force && pass.width == w && pass.height == h && pass.format == frameFormat)
+		const auto [workWidth, workHeight] = FinalWorkSize(w, h, scale);
+		if (!force && pass.outputWidth == w && pass.outputHeight == h && pass.width == workWidth && pass.height == workHeight && pass.format == frameFormat)
 			return;
 		ReleasePassResources();
 		D3D11_TEXTURE2D_DESC desc{};
@@ -552,14 +583,20 @@ struct NeuralRendering::Impl
 		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 		srv.Texture2D.MipLevels = 1;
 		pass.original->CreateSRV(srv);
-		pass.color = interop.CreateTexture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, "NeuralRendering::FinalImage Input");
-		pass.depth = interop.CreateTexture(w, h, DXGI_FORMAT_R32_FLOAT, "NeuralRendering::FinalImage Depth");
-		pass.motion = interop.CreateTexture(w, h, DXGI_FORMAT_R16G16_FLOAT, "NeuralRendering::FinalImage Motion");
-		pass.output = interop.CreateTexture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, "NeuralRendering::FinalImage Output");
-		pass.width = w;
-		pass.height = h;
+		pass.color = interop.CreateTexture(workWidth, workHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, "NeuralRendering::FinalImage Input");
+		pass.depth = interop.CreateTexture(workWidth, workHeight, DXGI_FORMAT_R32_FLOAT, "NeuralRendering::FinalImage Depth");
+		pass.motion = interop.CreateTexture(workWidth, workHeight, DXGI_FORMAT_R16G16_FLOAT, "NeuralRendering::FinalImage Motion");
+		pass.output = interop.CreateTexture(workWidth, workHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, "NeuralRendering::FinalImage Output");
+		pass.width = workWidth;
+		pass.height = workHeight;
+		pass.outputWidth = w;
+		pass.outputHeight = h;
 		pass.format = frameFormat;
-		logger::info("[NeuralRendering] final-image NR {}x{}, frame format {}", w, h, static_cast<uint32_t>(frameFormat));
+		if (workWidth == w && workHeight == h)
+			logger::info("[NeuralRendering] final-image NR {}x{}, frame format {}", w, h, static_cast<uint32_t>(frameFormat));
+		else
+			logger::info("[NeuralRendering] final-image NR {}x{} working size for a {}x{} frame (scale {:.2f}), frame format {}", workWidth, workHeight, w, h,
+				scale, static_cast<uint32_t>(frameFormat));
 	}
 
 	/** @brief Publishes this frame's crop for one eye; every kernel that reads a neural sample needs it. */
@@ -1251,15 +1288,27 @@ struct NeuralRendering::Impl
 		if (!prepare || !composite)
 			throw std::runtime_error("NR final-image shader unavailable");
 		auto& pass = finalImage;
+		if (!finalSampler) {
+			D3D11_SAMPLER_DESC samplerDesc{};
+			samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+			samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+			samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+			samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+			winrt::check_hresult(globals::d3d::device->CreateSamplerState(&samplerDesc, finalSampler.put()));
+			Util::SetResourceName(finalSampler.get(), "NeuralRendering::FinalImage Sampler");
+		}
+		auto* sampler = finalSampler.get();
 		const IsolatedContext scope(context.get(), isolated.get());
 		context->CopyResource(pass.original->resource.get(), a_hudless);
 		NR::Diagnostics::CameraSample camera;
 		UpdateCamera(0, pass.position, pass.forward, pass.frame, a_reset, a_options, camera, false);
-		finalImageBuffer->Update(FinalImageData{ pass.width, pass.height, a_renderWidth, a_renderHeight, std::clamp(mix, 0.0f, 1.0f) });
+		FinalImageData data{ pass.outputWidth, pass.outputHeight, a_renderWidth, a_renderHeight, std::clamp(mix, 0.0f, 1.0f), pass.width, pass.height };
+		finalImageBuffer->Update(data);
 		auto* buffer = finalImageBuffer->CB();
 		{
 			CS_GPU_PASS("Upscaling::NRFinalPrepare");
 			context->CSSetConstantBuffers(0, 1, &buffer);
+			context->CSSetSamplers(0, 1, &sampler);
 			ID3D11ShaderResourceView* inputs[]{ pass.original->srv.get(), a_depth, a_motion };
 			ID3D11UnorderedAccessView* outputs[]{ pass.color->uav, pass.depth->uav, pass.motion->uav };
 			context->CSSetShaderResources(0, ARRAYSIZE(inputs), inputs);
@@ -1299,11 +1348,12 @@ struct NeuralRendering::Impl
 		{
 			CS_GPU_PASS("Upscaling::NRFinalComposite");
 			context->CSSetConstantBuffers(0, 1, &buffer);
-			ID3D11ShaderResourceView* inputs[]{ pass.original->srv.get(), pass.output->srv };
+			context->CSSetSamplers(0, 1, &sampler);
+			ID3D11ShaderResourceView* inputs[]{ pass.original->srv.get(), pass.output->srv, pass.color->srv };
 			context->CSSetShaderResources(0, ARRAYSIZE(inputs), inputs);
 			context->CSSetUnorderedAccessViews(0, 1, &a_hudlessUAV, nullptr);
 			context->CSSetShader(composite, nullptr, 0);
-			context->Dispatch((pass.width + 7) / 8, (pass.height + 7) / 8, 1);
+			context->Dispatch((pass.outputWidth + 7) / 8, (pass.outputHeight + 7) / 8, 1);
 			context->ClearState();
 		}
 		CopyTestFrame(pass.original->resource.get(), a_hudless, a_frame);
@@ -1407,11 +1457,12 @@ bool NeuralRendering::DialogueOpen()
 void NeuralRendering::SetupResources() { retryRequested = recreate = resetHistory = true; }
 void NeuralRendering::SetTestCapture(uint32_t a_frames) { testCaptureFrames.store(std::min(a_frames, kMaxTestCaptureFrames), std::memory_order_relaxed); }
 void NeuralRendering::SetUnitExposure(bool a_unit) { unitExposure.store(a_unit, std::memory_order_relaxed); }
-void NeuralRendering::SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants)
+void NeuralRendering::SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales)
 {
 	testCycleSeconds.store(a_seconds ? std::max(a_seconds, kMinTestCycleSeconds) : 0, std::memory_order_relaxed);
 	testCyclePlacements.store(a_placements, std::memory_order_relaxed);
 	testCycleVariants.store(a_variants, std::memory_order_relaxed);
+	testCycleScales.store(a_scales, std::memory_order_relaxed);
 }
 
 const char* NeuralRendering::PlacementName(Placement a_placement)
@@ -1464,12 +1515,15 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	const auto seconds = testCycleSeconds.load(std::memory_order_relaxed);
 	if (!a_enabled || !seconds || !testCaptureFrames.load(std::memory_order_relaxed) || !globals::state->worldRenderedThisFrame)
 		return a_enabled;
-	const bool variants = testCycleVariants.load(std::memory_order_relaxed);
-	const bool placements = !variants && testCyclePlacements.load(std::memory_order_relaxed);
+	const bool scales = testCycleScales.load(std::memory_order_relaxed);
+	const bool variants = !scales && testCycleVariants.load(std::memory_order_relaxed);
+	const bool placements = !scales && !variants && testCyclePlacements.load(std::memory_order_relaxed);
 	const auto now = std::chrono::steady_clock::now();
 	if (testCycleTurn == UINT32_MAX) {
 		testCycleStart = now;
-		if (variants)
+		if (scales)
+			logger::info("[NeuralRendering] test cycle: {} s turns of NR on the final image at {} working scales, each followed by a turn without NR", seconds, std::size(kTestCycleScales));
+		else if (variants)
 			logger::info("[NeuralRendering] test cycle: {} s turns of NR before upscaling through {} variants, each followed by a turn without NR", seconds, std::size(kTestCycleVariants));
 		else if (placements)
 			logger::info("[NeuralRendering] test cycle: {} s turns of NR before upscaling, none, NR on the final image, none", seconds);
@@ -1482,11 +1536,20 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	if (run && placements)
 		a_placement = turn % 4 == 0 ? Placement::kBeforeUpscaling : Placement::kFinalImage;
 	testCycleVariant = -1;
+	testCycleScale = -1;
 	if (run && variants) {
 		a_placement = Placement::kBeforeUpscaling;
 		testCycleVariant = static_cast<int32_t>((turn / 2) % std::size(kTestCycleVariants));
 	}
-	const char* name = !run ? "off" : testCycleVariant >= 0 ? kTestCycleVariants[testCycleVariant].name : placements ? PlacementName(a_placement) : "on";
+	if (run && scales) {
+		a_placement = Placement::kFinalImage;
+		testCycleScale = static_cast<int32_t>((turn / 2) % std::size(kTestCycleScales));
+	}
+	const char* name = !run                  ? "off" :
+	                   testCycleScale >= 0   ? kTestCycleScales[testCycleScale].name :
+	                   testCycleVariant >= 0 ? kTestCycleVariants[testCycleVariant].name :
+	                   placements            ? PlacementName(a_placement) :
+	                                           "on";
 	if (turn != testCycleTurn) {
 		if (testCycleTurn != UINT32_MAX)
 			ReportTestCycleTurn(now);
@@ -1528,7 +1591,7 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	}
 	// The turn's last 1.5 s: NR's history, or its absence, has settled by then.
 	// Variant cycle: one more frame 1.5 s earlier, so each turn has a still-camera pair to measure flicker on.
-	if (variants && !testCyclePairRequested && intoTurn >= seconds - 3.0) {
+	if ((variants || scales) && !testCyclePairRequested && intoTurn >= seconds - 3.0) {
 		testCyclePairRequested = true;
 		globals::features::upscaling.dx12SwapChain.RequestTestDump(std::format(L"t{:02}-{}-a", turn, std::wstring(name, name + std::strlen(name))));
 	}
@@ -1921,6 +1984,10 @@ void NeuralRendering::DrawSettings(bool& enabled, uint32_t& placement, float& mi
 	}
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::Text("%s", T(TKEY("tone_transfer_tooltip"), "Luminance gain applies only NR's bounded brightness change and keeps the game's colour.\nACES round trip gives NR an ACES-tonemapped copy and brings its colour back exactly, keeping the original in the highlights."));
+	changed |= ImGui::SliderFloat(T(TKEY("final_scale"), "Final Image Resolution"), &tuning.finalScale, NR::Tuning::kMinFinalScale, NR::Tuning::kMaxFinalScale,
+		"%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("final_scale_tooltip"), "Final image placement: the share of the output size, per axis, that the model works at.\nBelow 1 only NR's edit is upscaled onto the full frame; the cost falls with the pixel count (0.75 = 56 %)."));
 	// 05-29 writes no material category lane, so the controls that act only through it are hidden
 	// while it is missing and their saved values keep the neutral defaults.
 	const bool categoryLane = impl->MaterialLane() != nullptr;
@@ -2256,6 +2323,10 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, Placement placement, flo
 				boundedTuning.localStructureStrength = 0.0f;
 			if (diagnostic.options & NR::Diagnostics::DisableSkin)
 				boundedTuning.skinStructureStrength = NR::Tuning::kAutomaticSkinStructure;
+			if (testCycleScale >= 0) {
+				boundedTuning.finalScale = kTestCycleScales[testCycleScale].scale;
+				boundedTuning.skinStructureStrength = kTestCycleScales[testCycleScale].skinStructure;
+			}
 			finalRequest.pending = true;
 			finalRequest.frame = state->frameCount;
 			finalRequest.renderWidth = NR::EyeRenderWidth(static_cast<uint32_t>(renderSize.x), 1);
@@ -2453,8 +2524,10 @@ void NeuralRendering::DrawOnFinalImage(ID3D11Texture2D* a_hudless, ID3D11Unorder
 		a_hudless->GetDesc(&desc);
 		const bool forceRecreate = recreate.exchange(false);
 		const auto& pass = work.finalImage;
-		const bool recreated = forceRecreate || pass.width != desc.Width || pass.height != desc.Height || pass.format != desc.Format;
-		work.EnsureFinalResources(desc.Width, desc.Height, desc.Format, forceRecreate);
+		const auto [workWidth, workHeight] = Impl::FinalWorkSize(desc.Width, desc.Height, request.tuning.finalScale);
+		const bool recreated = forceRecreate || pass.outputWidth != desc.Width || pass.outputHeight != desc.Height || pass.width != workWidth ||
+		                       pass.height != workHeight || pass.format != desc.Format;
+		work.EnsureFinalResources(desc.Width, desc.Height, desc.Format, request.tuning.finalScale, forceRecreate);
 		if (recreated)
 			PublishResources();
 		// A gap since the pass last ran (a menu, a placement switch) starts a fresh history, as before upscaling.
@@ -2489,8 +2562,8 @@ void NeuralRendering::DrawOnFinalImage(ID3D11Texture2D* a_hudless, ID3D11Unorder
 			activePlacement = Placement::kFinalImage;
 			const auto runtime = work.runtime.Version();
 			PublishStatus(Status::State::kActive, FormatActiveStatus(runtime, true));
-			logger::info("[NeuralRendering] active on the final image: runtime {}, {}x{} from a {}x{} render", runtime, pass.width, pass.height,
-				request.renderWidth, request.renderHeight);
+			logger::info("[NeuralRendering] active on the final image: runtime {}, {}x{} (model {}x{}) from a {}x{} render", runtime, pass.outputWidth,
+				pass.outputHeight, pass.width, pass.height, request.renderWidth, request.renderHeight);
 			// Every start gets its own test capture once the history settles, as before upscaling.
 			if (testCaptureFrames.load(std::memory_order_relaxed))
 				testCaptureAt = appliedFrames.load(std::memory_order_relaxed) + kTestCaptureAfterFrames;

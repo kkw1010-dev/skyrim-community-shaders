@@ -99,6 +99,8 @@ public:
 		bool neuralRenderingTestCyclePlacements = false;
 		// Test aid: the test cycle's NR turns step through run set 6's variants (skin structure, tone transfer, no depth).
 		bool neuralRenderingTestCycleVariants = false;
+		// Test aid: the test cycle's NR turns run on the final image at each of run set 7's working scales.
+		bool neuralRenderingTestCycleScales = false;
 	};
 
 	/** @brief The saved NR placement, clamped to a known one. */
