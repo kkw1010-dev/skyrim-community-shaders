@@ -214,6 +214,8 @@ private:
 	std::chrono::steady_clock::time_point testCycleStart{};
 	uint32_t testCycleTurn = UINT32_MAX;
 	bool testCycleDumpRequested = false;
+	/** @brief The earlier frame of the turn's still-camera pair (variant cycle), for a flicker measure. */
+	bool testCyclePairRequested = false;
 	/** @brief Name of the running turn: "on", "off", or a placement when the placements alternate. */
 	const char* testCycleTurnName = "";
 	/**

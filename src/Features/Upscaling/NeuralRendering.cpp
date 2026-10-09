@@ -1493,6 +1493,7 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 		testCycleTurn = turn;
 		testCycleTurnName = name;
 		testCycleDumpRequested = false;
+		testCyclePairRequested = false;
 		testCycleWindowFrames = 0;
 		testCycleWindowPresented = 0;
 		testCycleLatencyMs = testCycleGpuFrameMs = 0.0;
@@ -1526,6 +1527,11 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 		}
 	}
 	// The turn's last 1.5 s: NR's history, or its absence, has settled by then.
+	// Variant cycle: one more frame 1.5 s earlier, so each turn has a still-camera pair to measure flicker on.
+	if (variants && !testCyclePairRequested && intoTurn >= seconds - 3.0) {
+		testCyclePairRequested = true;
+		globals::features::upscaling.dx12SwapChain.RequestTestDump(std::format(L"t{:02}-{}-a", turn, std::wstring(name, name + std::strlen(name))));
+	}
 	if (!testCycleDumpRequested && intoTurn >= seconds - 1.5) {
 		testCycleDumpRequested = true;
 		globals::features::upscaling.dx12SwapChain.RequestTestDump(std::format(L"t{:02}-{}", turn, std::wstring(name, name + std::strlen(name))));
