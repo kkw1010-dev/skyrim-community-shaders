@@ -366,6 +366,7 @@ void Menu::Load(json& o_json)
 	loadComboList(o_json, "ShaderBlockNextKey", settings.ShaderBlockNextKey);
 	loadComboList(o_json, "WeatherEditorToggleKey", settings.WeatherEditorToggleKey);
 	loadComboList(o_json, "ScreenshotKey", settings.ScreenshotKey);
+	loadComboList(o_json, "NeuralRenderingToggleKey", settings.NeuralRenderingToggleKey);
 
 	// Legacy support: If old config has Theme data and no SelectedThemePreset, load it
 	if (o_json.contains("Theme") && o_json["Theme"].is_object() && settings.SelectedThemePreset.empty()) {
@@ -431,6 +432,7 @@ void Menu::Save(json& o_json)
 	InputCombo::ComboList::to_json(o_json["ShaderBlockNextKey"], settings.ShaderBlockNextKey);
 	InputCombo::ComboList::to_json(o_json["WeatherEditorToggleKey"], settings.WeatherEditorToggleKey);
 	InputCombo::ComboList::to_json(o_json["ScreenshotKey"], settings.ScreenshotKey);
+	InputCombo::ComboList::to_json(o_json["NeuralRenderingToggleKey"], settings.NeuralRenderingToggleKey);
 }
 
 void Menu::LoadTheme(json& o_json)
@@ -761,7 +763,8 @@ void Menu::DrawGeneralSettings()
 		.settingShaderBlockPrevKey = settingShaderBlockPrevKey,
 		.settingShaderBlockNextKey = settingShaderBlockNextKey,
 		.settingWeatherEditorToggleKey = settingWeatherEditorToggleKey,
-		.settingScreenshotKey = settingScreenshotKey
+		.settingScreenshotKey = settingScreenshotKey,
+		.settingNeuralRenderingToggleKey = settingNeuralRenderingToggleKey
 	};
 
 	// Render settings using extracted component
@@ -1002,6 +1005,7 @@ void Menu::ProcessInputEventQueue()
 					{ &settings.ShaderBlockNextKey, &settingShaderBlockNextKey, [this](std::vector<InputCombo> keys) { settings.ShaderBlockNextKey = keys; settingShaderBlockNextKey = false; } },
 					{ &settings.WeatherEditorToggleKey, &settingWeatherEditorToggleKey, [this](std::vector<InputCombo> keys) { settings.WeatherEditorToggleKey = keys; settingWeatherEditorToggleKey = false; } },
 					{ &settings.ScreenshotKey, &settingScreenshotKey, [this](std::vector<InputCombo> keys) { settings.ScreenshotKey = keys; settingScreenshotKey = false; } },
+					{ &settings.NeuralRenderingToggleKey, &settingNeuralRenderingToggleKey, [this](std::vector<InputCombo> keys) { settings.NeuralRenderingToggleKey = keys; settingNeuralRenderingToggleKey = false; } },
 				};
 				bool handled = false;
 				for (auto& h : hotkeyActions) {
@@ -1084,6 +1088,7 @@ void Menu::ProcessInputEventQueue()
 							 if (globals::features::screenshotFeature.loaded)
 								 globals::features::screenshotFeature.captureRequested = true;
 						 } },
+						{ settings.NeuralRenderingToggleKey, []() { globals::features::upscaling.ToggleNeuralRendering(); } },
 					};
 					if (!globals::features::renderDoc.HandleCaptureHotkey(key)) {
 						for (const auto& ka : keyActions) {
@@ -1114,7 +1119,8 @@ void Menu::ProcessInputEventQueue()
 				&settings.ToggleKey, &settings.EffectToggleKey,
 				&settings.OverlayToggleKey, &settings.ShaderBlockPrevKey, &settings.ShaderBlockNextKey,
 				&settings.WeatherEditorToggleKey,
-				&settings.ScreenshotKey
+				&settings.ScreenshotKey,
+				&settings.NeuralRenderingToggleKey
 			};
 			bool isHotkey = ShouldSwallowInput() && std::any_of(std::begin(hotkeys), std::end(hotkeys),
 														[key](const auto* combo) { return InputCombo::MatchesKeyboardCombo(*combo, key); });
@@ -1144,7 +1150,8 @@ void Menu::ProcessInputEventQueue()
 bool Menu::IsCapturingHotkeyInput() const
 {
 	return settingToggleKey || settingSkipCompilationKey || settingsEffectsToggle ||
-	       settingOverlayToggleKey || settingShaderBlockPrevKey || settingShaderBlockNextKey || settingWeatherEditorToggleKey || settingScreenshotKey;
+	       settingOverlayToggleKey || settingShaderBlockPrevKey || settingShaderBlockNextKey || settingWeatherEditorToggleKey || settingScreenshotKey ||
+	       settingNeuralRenderingToggleKey;
 }
 
 void Menu::addToEventQueue(KeyEvent e)

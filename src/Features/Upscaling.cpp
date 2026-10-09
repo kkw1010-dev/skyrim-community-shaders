@@ -701,6 +701,23 @@ void Upscaling::RestoreDefaultSettings()
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
 }
 
+void Upscaling::ToggleNeuralRendering()
+{
+	if (!loaded || globals::game::isVR)
+		return;
+	if (!settings.neuralRenderingEnabled) {
+		// The panel locks its checkbox the same way: an unloadable runtime would only latch a failure.
+		const auto availability = neuralRendering.GetRuntimeAvailability();
+		if (!availability.AllowsLoad(globals::state->IsDeveloperMode())) {
+			logger::info("[NeuralRendering] hotkey ignored: {}", availability.reason);
+			return;
+		}
+	}
+	settings.neuralRenderingEnabled = !settings.neuralRenderingEnabled;
+	neuralRendering.RequestRetry();
+	logger::info("[NeuralRendering] {} by hotkey", settings.neuralRenderingEnabled ? "on" : "off");
+}
+
 void Upscaling::DataLoaded()
 {
 	// Fix screenshots fix from Engine Fixes

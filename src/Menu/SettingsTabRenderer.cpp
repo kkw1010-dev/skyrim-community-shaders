@@ -397,6 +397,13 @@ void SettingsTabRenderer::RenderKeybindingsTab(
 			state.settingScreenshotKey,
 			"Change##Screenshot");
 
+		if (!globals::game::isVR)
+			Util::InputComboWidget(
+				T("menu.settings.neural_rendering_toggle_key", "Neural Rendering Toggle Key:"),
+				settings.NeuralRenderingToggleKey,
+				state.settingNeuralRenderingToggleKey,
+				"Change##NeuralRenderingToggle");
+
 		ImGui::EndTabItem();
 	}
 }

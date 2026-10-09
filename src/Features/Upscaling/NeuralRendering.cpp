@@ -5,6 +5,7 @@
 #include "Globals.h"
 #include "GpuPass.h"
 #include "I18n/I18n.h"
+#include "Menu.h"
 #include "NeuralRendering/ActorRegion.h"
 #include "NeuralRendering/D3D12Interop.h"
 #include "NeuralRendering/FoveaClip.h"
@@ -73,10 +74,10 @@ namespace
 	constexpr ImU32 kActorBoxPreviewColor = IM_COL32(255, 255, 0, 255);
 
 	/**
-	 * @brief Applied NR frames before a test capture starts, so the temporal history has settled. Later
-	 *        than the DLSS-G input dump (composed frame 600), so that dump's stall misses the captured frames.
+	 * @brief NR frames from NR starting to its test capture, so the temporal history has settled: about
+	 *        5 s at 60 fps. At load this also stays clear of the DLSS-G input dump at composed frame 600.
 	 */
-	constexpr uint32_t kTestCaptureAfterFrames = 900;
+	constexpr uint32_t kTestCaptureAfterFrames = 300;
 
 	/** @brief Most consecutive frames one test capture holds; each frame keeps two render-size copies. */
 	constexpr uint32_t kMaxTestCaptureFrames = 8;
@@ -1464,6 +1465,9 @@ void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& context
 	if (ImGui::Checkbox(T(TKEY("enable"), "Enable Neural Rendering"), &enabled))
 		retryRequested = resetHistory = true;
 	ImGui::EndDisabled();
+	// The same switch is on a hotkey (Settings > Keybindings); it takes effect on the next frame.
+	ImGui::SameLine();
+	Util::Text::Disabled("(%s)", Util::Input::KeyIdToString(globals::menu->GetSettings().NeuralRenderingToggleKey).c_str());
 	if (lockEnable) {
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::TextUnformatted(availability.reason.c_str());
@@ -1903,8 +1907,8 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 		diagnostic.localStructure = boundedTuning.localStructureStrength;
 		diagnostic.skinStructure = boundedTuning.skinStructureStrength;
 		const auto testCapture = testCaptureFrames.load(std::memory_order_relaxed);
-		if (testCapture && !testCaptureStarted && appliedFrames.load(std::memory_order_relaxed) >= kTestCaptureAfterFrames) {
-			testCaptureStarted = true;
+		if (testCapture && appliedFrames.load(std::memory_order_relaxed) >= testCaptureAt) {
+			testCaptureAt = UINT32_MAX;
 			if (work.StartTestCapture(testCapture))
 				logger::info("[NeuralRendering] test capture: the next {} frames, before and after NR", testCapture);
 			else
@@ -1933,6 +1937,9 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 			const auto luid = work.interop.AdapterLuid();
 			PublishStatus(Status::State::kActive, FormatActiveStatus(runtime));
 			logger::info("[NeuralRendering] active: runtime {} on adapter LUID {:08X}:{:08X}", runtime, luid.HighPart, luid.LowPart);
+			// Every start, at load or switched back on, gets its own test capture once the history settles.
+			if (testCaptureFrames.load(std::memory_order_relaxed))
+				testCaptureAt = appliedFrames.load(std::memory_order_relaxed) + kTestCaptureAfterFrames;
 		}
 		diagnostic.outcome = (diagnostic.options & NR::Diagnostics::BypassWriteback) ? Outcome::Bypassed : Outcome::Applied;
 		work.lastFrame = state->frameCount;

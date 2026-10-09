@@ -21,6 +21,7 @@ public:
 		bool& settingShaderBlockNextKey;      // Debug: shader block next key
 		bool& settingWeatherEditorToggleKey;  // Weather Editor toggle key
 		bool& settingScreenshotKey;           // Screenshot capture key
+		bool& settingNeuralRenderingToggleKey;  // Neural Rendering on/off key
 	};
 
 	static void RenderGeneralSettings(

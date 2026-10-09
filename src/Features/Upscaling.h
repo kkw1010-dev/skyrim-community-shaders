@@ -147,6 +147,11 @@ public:
 	virtual void SetupResources() override;
 	/** @brief Propagates frame inactivity to NR temporal history. */
 	virtual void Reset() override { neuralRendering.Reset(settings.neuralRenderingEnabled, settings.neuralRenderingTuning.regionOfInterest, settings.neuralRenderingTuning.regionFit, settings.neuralRenderingTuning.regionGroup); }
+	/**
+	 * @brief The Neural Rendering hotkey: flips the same setting as the panel's checkbox, effective on the
+	 *        next frame. Switching on is refused, with a log line, while the runtime cannot load.
+	 */
+	void ToggleNeuralRendering();
 
 	UpscaleMethod GetUpscaleMethod() const;
 	FrameGenMethod GetFrameGenMethod() const;

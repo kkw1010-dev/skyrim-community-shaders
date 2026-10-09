@@ -142,6 +142,7 @@ public:
 	bool settingShaderBlockNextKey = false;      // Debug: capture shader block next key
 	bool settingWeatherEditorToggleKey = false;  // Weather Editor toggle key
 	bool settingScreenshotKey = false;           // Screenshot capture key
+	bool settingNeuralRenderingToggleKey = false;  // Neural Rendering on/off key
 
 	// Font caching (made public for ThemeManager and OverlayRenderer access)
 	// Marked mutable because they're cache fields that may be updated from const methods
@@ -407,6 +408,7 @@ public:
 		std::vector<InputCombo> ShaderBlockNextKey = { InputCombo::Keyboard(VK_NEXT) };     // Debug: cycle forward through shaders (PageDown)
 		std::vector<InputCombo> WeatherEditorToggleKey = { InputCombo::Keyboard(VK_SHIFT), InputCombo::Keyboard(VK_END) };  // Weather Editor toggle key
 		std::vector<InputCombo> ScreenshotKey = { InputCombo::Keyboard(VK_SNAPSHOT) };                                    // Screenshot capture key
+		std::vector<InputCombo> NeuralRenderingToggleKey = { InputCombo::Keyboard(VK_DIVIDE) };                           // Neural Rendering on/off (Upscaling), numpad /
 		bool EnableShaderBlocking = false;                                                  // Enable shader blocking hotkeys for debugging
 		bool FirstTimeSetupCompleted = false;                                               // Track if first-time setup has been completed
 		bool SkipClearCacheConfirmation = false;                                            // Skip confirmation dialog when clearing shader cache
