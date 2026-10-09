@@ -1851,10 +1851,9 @@ void Upscaling::UpdateFrameGenerationHold()
 	const uint32_t frame = globals::state ? globals::state->frameCount : 0;
 	if (frame == frameGenerationHoldUpdatedFrame)
 		return;
+	// Every Present counts a frame, but only frames with the world reach post-processing.
+	const bool afterGap = frameGenerationHoldUpdatedFrame != UINT32_MAX && frame - frameGenerationHoldUpdatedFrame > kFrameGenerationLoadingGapFrames;
 	frameGenerationHoldUpdatedFrame = frame;
-	const auto now = std::chrono::steady_clock::now();
-	const bool afterGap = lastPostProcessingTime != std::chrono::steady_clock::time_point{} && now - lastPostProcessingTime > kFrameGenerationLoadingGap;
-	lastPostProcessingTime = now;
 	if (frameGenerationHoldFrames)
 		--frameGenerationHoldFrames;
 	if (!IsFrameGenerationDx12PathActive() || !settings.frameGenerationMode)
@@ -1865,7 +1864,7 @@ void Upscaling::UpdateFrameGenerationHold()
 	if (!FrameGenerationPermitted())
 		HoldFrameGeneration(kFrameGenerationHold, nullptr);
 	else if (afterGap)
-		HoldFrameGeneration(kFrameGenerationHold, "after a loading screen or a long frame");
+		HoldFrameGeneration(kFrameGenerationHold, "after a loading screen");
 }
 
 bool Upscaling::ShouldUseFrameGenerationThisFrame() const
