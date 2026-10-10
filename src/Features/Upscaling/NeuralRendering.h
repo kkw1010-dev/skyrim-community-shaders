@@ -185,7 +185,7 @@ struct NeuralRendering
 	 * @param a_scales True makes the runs step through kTestCycleScales on the final image (run set 7); it takes
 	 *        precedence over both.
 	 */
-	void SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales, bool a_mixes);
+	void SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales, bool a_mixes, bool a_conditions);
 
 private:
 	struct Impl;
@@ -225,6 +225,14 @@ private:
 	std::atomic_bool testCycleMixes = false;
 	/** @brief Index into the mix table for the running turn; -1 when none applies. */
 	int32_t testCycleMix = -1;
+	/** @brief The test cycle steps through CS feature conditions, NR on then off in each (PP and lighting A/B). */
+	std::atomic_bool testCycleConditions = false;
+	/** @brief The condition now applied (-1 none), the features' settings and the sharpening before the first one. */
+	int32_t testCycleCondition = -1;
+	std::unordered_map<std::string, json> testCycleOriginals;
+	float testCycleOriginalSharpness = 0.0f;
+	/** @brief Applies condition a_index (its patches on top of the saved settings) and logs it. */
+	void ApplyTestCondition(int32_t a_index);
 	/** @brief When the test cycle's first turn began, and the turn last logged (even turns run NR). */
 	std::chrono::steady_clock::time_point testCycleStart{};
 	uint32_t testCycleTurn = UINT32_MAX;

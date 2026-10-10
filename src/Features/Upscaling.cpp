@@ -65,7 +65,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingTestCyclePlacements,
 	neuralRenderingTestCycleVariants,
 	neuralRenderingTestCycleScales,
-	neuralRenderingTestCycleMixes);
+	neuralRenderingTestCycleMixes,
+	neuralRenderingTestCycleConditions);
 
 decltype(&D3D11CreateDeviceAndSwapChain) ptrD3D11CreateDeviceAndSwapChainUpscaling;
 
@@ -669,7 +670,8 @@ void Upscaling::LoadSettings(json& o_json)
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
 	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements, settings.neuralRenderingTestCycleVariants,
-		settings.neuralRenderingTestCycleScales, settings.neuralRenderingTestCycleMixes);
+		settings.neuralRenderingTestCycleScales, settings.neuralRenderingTestCycleMixes,
+		settings.neuralRenderingTestCycleConditions);
 
 	// Sanitize loaded settings to ensure enum indices are valid
 	constexpr auto enumCount = 4;  // UpscaleMethod has 4 values: kNONE, kTAA, kFSR, kDLSS
@@ -717,7 +719,8 @@ void Upscaling::RestoreDefaultSettings()
 	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
 	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
 	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements, settings.neuralRenderingTestCycleVariants,
-		settings.neuralRenderingTestCycleScales, settings.neuralRenderingTestCycleMixes);
+		settings.neuralRenderingTestCycleScales, settings.neuralRenderingTestCycleMixes,
+		settings.neuralRenderingTestCycleConditions);
 }
 
 void Upscaling::ToggleNeuralRendering()

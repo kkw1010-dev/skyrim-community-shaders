@@ -162,6 +162,26 @@ namespace
 		{ "final-s100-skinauto", 1.0f, NR::Tuning::kAutomaticSkinStructure },
 	};
 
+	/**
+	 * @brief One condition of the feature test cycle (run set 9): settings patches on other CS features, applied
+	 *        through their own SaveSettings / LoadSettings, plus the DLSS sharpening. NR runs on, then off, in each.
+	 */
+	struct TestCondition
+	{
+		const char* name;
+		const char* patches;  // JSON object: feature name -> merge patch of its settings
+		float sharpness;      // DLSS sharpening for the condition; negative keeps the user's value
+	};
+	constexpr TestCondition kTestConditions[] = {
+		{ "base", "{}", -1.0f },
+		{ "pp-overlap-off",
+			R"({"Post Processing":{"Local Exposure":{"enabled":false},"Physical Glare":{"enabled":false},"COD Bloom":{"enabled":false},"Lens Flare":{"enabled":false}}})",
+			0.0f },
+		{ "ssgi-ao-off", R"({"Screen Space GI":{"AOPower":0.0}})", -1.0f },
+		{ "skin-hair-off", R"({"Subsurface Scattering":{"BaseProfile":{"Strength":[0.0,0.0,0.0]}},"Hair Specular":{"Enabled":0}})", -1.0f },
+		{ "shadow-fill-off", R"({"Screen Space Shadows":{"Enable":0},"Pseudo Sun Bounce":{"intensity":0.0}})", -1.0f },
+	};
+
 	/** @brief One run of the mix test cycle (run set 8): NR on the final image with this mix and local strengths. */
 	struct TestCycleMix
 	{
@@ -1507,8 +1527,9 @@ bool NeuralRendering::DialogueOpen()
 void NeuralRendering::SetupResources() { retryRequested = recreate = resetHistory = true; }
 void NeuralRendering::SetTestCapture(uint32_t a_frames) { testCaptureFrames.store(std::min(a_frames, kMaxTestCaptureFrames), std::memory_order_relaxed); }
 void NeuralRendering::SetUnitExposure(bool a_unit) { unitExposure.store(a_unit, std::memory_order_relaxed); }
-void NeuralRendering::SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales, bool a_mixes)
+void NeuralRendering::SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales, bool a_mixes, bool a_conditions)
 {
+	testCycleConditions.store(a_conditions, std::memory_order_relaxed);
 	testCycleMixes.store(a_mixes, std::memory_order_relaxed);
 	testCycleSeconds.store(a_seconds ? std::max(a_seconds, kMinTestCycleSeconds) : 0, std::memory_order_relaxed);
 	testCyclePlacements.store(a_placements, std::memory_order_relaxed);
@@ -1566,14 +1587,17 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	const auto seconds = testCycleSeconds.load(std::memory_order_relaxed);
 	if (!a_enabled || !seconds || !testCaptureFrames.load(std::memory_order_relaxed) || !globals::state->worldRenderedThisFrame)
 		return a_enabled;
-	const bool mixes = testCycleMixes.load(std::memory_order_relaxed);
+	const bool conditions = testCycleConditions.load(std::memory_order_relaxed);
+	const bool mixes = !conditions && testCycleMixes.load(std::memory_order_relaxed);
 	const bool scales = !mixes && testCycleScales.load(std::memory_order_relaxed);
 	const bool variants = !mixes && !scales && testCycleVariants.load(std::memory_order_relaxed);
 	const bool placements = !mixes && !scales && !variants && testCyclePlacements.load(std::memory_order_relaxed);
 	const auto now = std::chrono::steady_clock::now();
 	if (testCycleTurn == UINT32_MAX) {
 		testCycleStart = now;
-		if (mixes)
+		if (conditions)
+			logger::info("[NeuralRendering] test cycle: {} s turns through {} CS feature conditions, NR on then off in each", seconds, std::size(kTestConditions));
+		else if (mixes)
 			logger::info("[NeuralRendering] test cycle: {} s turns of NR on the final image through {} mix and tone / structure pairs, each followed by a turn without NR", seconds, std::size(kTestCycleMixes));
 		else if (scales)
 			logger::info("[NeuralRendering] test cycle: {} s turns of NR on the final image at {} working scales, each followed by a turn without NR", seconds, std::size(kTestCycleScales));
@@ -1592,6 +1616,17 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	testCycleVariant = -1;
 	testCycleScale = -1;
 	testCycleMix = -1;
+	// Conditions: turns 2k and 2k+1 share condition k (NR on, then off), so each condition has its own NR-off frame.
+	// The turn's name outlives this call (testCycleTurnName keeps the pointer), so it lives in a static string.
+	static std::string conditionName;
+	if (conditions) {
+		const auto condition = static_cast<int32_t>((turn / 2) % std::size(kTestConditions));
+		if (condition != testCycleCondition)
+			ApplyTestCondition(condition);
+		auto name = std::format("{}-{}", kTestConditions[condition].name, run ? "on" : "off");
+		if (name != conditionName)
+			conditionName = std::move(name);
+	}
 	if (run && mixes) {
 		a_placement = Placement::kFinalImage;
 		testCycleMix = static_cast<int32_t>((turn / 2) % std::size(kTestCycleMixes));
@@ -1604,7 +1639,8 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 		a_placement = Placement::kFinalImage;
 		testCycleScale = static_cast<int32_t>((turn / 2) % std::size(kTestCycleScales));
 	}
-	const char* name = !run                  ? "off" :
+	const char* name = conditions            ? conditionName.c_str() :
+	                   !run                  ? "off" :
 	                   testCycleMix >= 0     ? kTestCycleMixes[testCycleMix].name :
 	                   testCycleScale >= 0   ? kTestCycleScales[testCycleScale].name :
 	                   testCycleVariant >= 0 ? kTestCycleVariants[testCycleVariant].name :
@@ -1651,7 +1687,7 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	}
 	// The turn's last 1.5 s: NR's history, or its absence, has settled by then.
 	// Variant cycle: one more frame 1.5 s earlier, so each turn has a still-camera pair to measure flicker on.
-	if ((variants || scales || mixes) && !testCyclePairRequested && intoTurn >= seconds - 3.0) {
+	if ((variants || scales || mixes || conditions) && !testCyclePairRequested && intoTurn >= seconds - 3.0) {
 		testCyclePairRequested = true;
 		globals::features::upscaling.dx12SwapChain.RequestTestDump(std::format(L"t{:02}-{}-a", turn, std::wstring(name, name + std::strlen(name))));
 	}
@@ -1662,6 +1698,41 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	}
 	return run;
 }
+void NeuralRendering::ApplyTestCondition(int32_t a_index)
+{
+	auto& upscaling = globals::features::upscaling;
+	if (testCycleCondition < 0) {
+		// The settings before the first condition: every condition is applied on top of these.
+		for (const auto& condition : kTestConditions)
+			for (const auto& [featureName, patch] : json::parse(condition.patches).items())
+				for (auto* feature : Feature::GetFeatureList())
+					if (feature->GetName() == featureName && !testCycleOriginals.contains(featureName)) {
+						json current;
+						feature->SaveSettings(current);
+						testCycleOriginals[featureName] = current;
+					}
+		testCycleOriginalSharpness = upscaling.settings.sharpnessDLSS;
+	}
+	testCycleCondition = a_index;
+	const auto& condition = kTestConditions[a_index];
+	const auto patches = json::parse(condition.patches);
+	for (auto* feature : Feature::GetFeatureList()) {
+		const auto original = testCycleOriginals.find(feature->GetName());
+		if (original == testCycleOriginals.end())
+			continue;
+		json settings = original->second;
+		if (patches.contains(feature->GetName()))
+			settings.merge_patch(patches[feature->GetName()]);
+		try {
+			feature->LoadSettings(settings);
+		} catch (const std::exception& error) {
+			logger::warn("[NeuralRendering] test condition {}: {} rejected its settings: {}", condition.name, feature->GetName(), error.what());
+		}
+	}
+	upscaling.settings.sharpnessDLSS = condition.sharpness >= 0.0f ? condition.sharpness : testCycleOriginalSharpness;
+	logger::info("[NeuralRendering] test condition {}: {} (DLSS sharpening {:.2f})", condition.name, condition.patches, upscaling.settings.sharpnessDLSS);
+}
+
 void NeuralRendering::ReportStatus()
 {
 	static constexpr double kStatusSeconds = 60.0;

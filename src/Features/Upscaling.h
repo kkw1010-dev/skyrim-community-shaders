@@ -103,6 +103,8 @@ public:
 		bool neuralRenderingTestCycleScales = false;
 		// Test aid: the test cycle's NR turns step through run set 8's mix x local tone / structure pairs on the final image.
 		bool neuralRenderingTestCycleMixes = false;
+		// Test aid: the test cycle steps through CS feature conditions (PP and lighting A/B), NR on then off in each.
+		bool neuralRenderingTestCycleConditions = false;
 	};
 
 	/** @brief The saved NR placement, clamped to a known one. */
