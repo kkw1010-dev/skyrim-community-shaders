@@ -142,6 +142,11 @@ struct NeuralRendering
 	Status GetStatus() const;
 	/** @brief Cached verdict for the runtime on disk: whether NR can start, and why not when it cannot. */
 	NR::RuntimeAvailability GetRuntimeAvailability() const;
+	/**
+	 * @brief Logs once whether nvngx_dlssnr.dll is usable, whatever the NR setting: a tester without it, or with
+	 *        another build, sees in one line that NR stays off and why, and that the rest of CS is unaffected.
+	 */
+	void LogRuntimeCheck() const;
 	/** @brief Snapshot of the tracked actor's crop, safe from any thread. */
 	Util::Region::StereoRegion GetRegionOfInterest() const;
 	/** @brief Which sources chose the crop of the last applied frame, safe from any thread. */

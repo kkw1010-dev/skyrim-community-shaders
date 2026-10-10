@@ -1764,6 +1764,16 @@ NR::RuntimeAvailability NeuralRendering::GetRuntimeAvailability() const
 	return NR::InspectRuntime(RuntimeDirectory());
 }
 
+void NeuralRendering::LogRuntimeCheck() const
+{
+	const auto availability = GetRuntimeAvailability();
+	if (availability.state == NR::RuntimeAvailability::State::kReady)
+		logger::info("[NeuralRendering] runtime check: nvngx_dlssnr.dll {} accepted (validated SHA-256); Neural Rendering can be switched on", availability.version);
+	else
+		logger::warn("[NeuralRendering] runtime check: Neural Rendering unavailable: {}. It stays off; DLSS, frame generation and the rest of Community Shaders run normally.",
+			availability.reason);
+}
+
 void NeuralRendering::DrawRuntimeDiagnostics() const
 {
 	// The Streamline table lists this file's version like any other DLL in that folder; the

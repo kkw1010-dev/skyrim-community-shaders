@@ -750,6 +750,8 @@ void Upscaling::DataLoaded()
 	// clear a persistent post-load GPU-time regression (see pendingDLSSReset comment).
 	if (globals::game::isVR)
 		MenuOpenCloseEventHandler::Register();
+	else
+		neuralRendering.LogRuntimeCheck();
 }
 
 RE::BSEventNotifyControl Upscaling::MenuOpenCloseEventHandler::ProcessEvent(
