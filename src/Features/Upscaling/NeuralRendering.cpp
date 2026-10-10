@@ -2387,6 +2387,13 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, Placement placement, flo
 		retryRequested.load(), impl->ready, impl->lastFrame, globals::state->frameCount });
 	if (context.resetHistory)
 		resetHistory = true;
+	// Without a usable runtime NR stays off quietly: the runtime check at load already logged why, and an
+	// initialization that can only fail would add an error line and a "stopped" status for testers to ask about.
+	if ((action == NR::FrameAction::InitializeThenRun || action == NR::FrameAction::RebuildThenRun) &&
+		!GetRuntimeAvailability().AllowsLoad(globals::state->IsDeveloperMode())) {
+		diagnostic.outcome = NR::Diagnostics::Outcome::Disabled;
+		return;
+	}
 	if (action == NR::FrameAction::ReleasePassResources) {
 		diagnostic.outcome = Outcome::Disabled;
 		// A latched failure may be a wedged queue, so its resources wait for Retry's draining teardown.
