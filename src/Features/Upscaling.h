@@ -84,7 +84,8 @@ public:
 		// DLSS Neural Rendering (NGX Feature 18), ported from Open Shaders; off until the user enables it.
 		bool neuralRenderingEnabled = false;
 		// Where NR runs: 0 before upscaling (Open Shaders' placement), 1 on the final image (NeuralRendering::Placement).
-		uint32_t neuralRenderingPlacement = 0;
+		// Default: the final image, the user's choice after run set 7.
+		uint32_t neuralRenderingPlacement = 1;
 		// Share of NR's edit shown, 0 to 2: above 1 extrapolates it.
 		float neuralRenderingMix = 1.0f;
 		NR::Context::Profiles neuralRenderingContexts;
