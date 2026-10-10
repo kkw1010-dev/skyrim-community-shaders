@@ -41,6 +41,38 @@ namespace
 		}
 	}
 
+	/** @brief The driver's user-mode version (e.g. 32.0.16.1664) and NVIDIA's reading of it (616.64), for testers' logs. */
+	std::string DriverVersion()
+	{
+		winrt::com_ptr<IDXGIDevice> dxgiDevice;
+		winrt::com_ptr<IDXGIAdapter> adapter;
+		LARGE_INTEGER umd{};
+		if (!globals::d3d::device || FAILED(globals::d3d::device->QueryInterface(IID_PPV_ARGS(dxgiDevice.put()))) ||
+			FAILED(dxgiDevice->GetAdapter(adapter.put())) || FAILED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd)))
+			return "unknown";
+		const auto high = static_cast<DWORD>(umd.HighPart), low = static_cast<DWORD>(umd.LowPart);
+		const uint32_t nvidia = (HIWORD(low) % 10) * 10000 + LOWORD(low);
+		return std::format("{}.{}.{}.{} (NVIDIA {}.{:02})", HIWORD(high), LOWORD(high), HIWORD(low), LOWORD(low), nvidia / 100, nvidia % 100);
+	}
+
+	/**
+	 * @brief One line with everything a tester's log needs to tell their setup apart: build, GPU, driver, runtime,
+	 *        placement and sizes, and every tuning value. Logged each time NR becomes active.
+	 */
+	void LogTesterSummary(const char* a_placement, const std::string& a_runtime, const NR::Tuning& a_tuning, float a_mix, uint32_t a_modelWidth,
+		uint32_t a_modelHeight, uint32_t a_frameWidth, uint32_t a_frameHeight)
+	{
+		auto& upscaling = globals::features::upscaling;
+		const std::string skin = a_tuning.skinStructureStrength < 0.0f ? std::string("Auto") : std::format("{:.2f}", a_tuning.skinStructureStrength);
+		const std::string frameGeneration = upscaling.UsesDLSSGFrameGen() ? std::format("DLSS-G {}x", upscaling.GetFrameGenerationMultiplier()) : std::string("off");
+		const bool hdr = globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.settings.enableHDR;
+		logger::info("[NeuralRendering] tester summary: CS {} | GPU {} | driver {} | NR runtime {} | placement {} | model {}x{} for a {}x{} frame | "
+					 "mix {:.2f}, style {}, intensity {:.2f}, local tone {:.2f}, local structure {:.2f}, skin {}, auto mask {} | frame generation {} | HDR {}",
+			Plugin::BUILD_DESCRIBE, globals::state->adapterDescription, DriverVersion(), a_runtime, a_placement, a_modelWidth, a_modelHeight, a_frameWidth,
+			a_frameHeight, a_mix, a_tuning.style, a_tuning.intensity, a_tuning.localToneStrength, a_tuning.localStructureStrength, skin,
+			a_tuning.useAutoMask ? "on" : "off", frameGeneration, hdr ? "on" : "off");
+	}
+
 	/** @brief Absolute plugin directory the runtime loads from; the load and the panel's verdict must resolve it alike. */
 	std::filesystem::path RuntimeDirectory()
 	{
@@ -1630,6 +1662,36 @@ bool NeuralRendering::ApplyTestCycle(bool a_enabled, Placement& a_placement)
 	}
 	return run;
 }
+void NeuralRendering::ReportStatus()
+{
+	static constexpr double kStatusSeconds = 60.0;
+	if (testCycleSeconds.load(std::memory_order_relaxed) || !globals::state)
+		return;
+	const auto frame = globals::state->frameCount;
+	if (frame == statusLastFrame)
+		return;
+	statusLastFrame = frame;
+	const auto now = std::chrono::steady_clock::now();
+	if (!statusFrames && !statusPresented)
+		statusWindowStart = now;
+	++statusFrames;
+	auto& upscaling = globals::features::upscaling;
+	if (upscaling.UsesDLSSGFrameGen() && upscaling.IsFrameGenerationActive())
+		statusPresented += upscaling.streamlineDX12.lastDLSSGFramesPresented;
+	const double seconds = std::chrono::duration<double>(now - statusWindowStart).count();
+	if (seconds < kStatusSeconds)
+		return;
+	const auto before = impl->passTimer.TakeTurn();
+	const auto finalImage = impl->finalPassTimer.TakeTurn();
+	const auto& gpu = finalImage.samples ? finalImage : before;
+	const std::string gpuText = gpu.samples ? std::format("NR GPU avg {:.2f} ms (max {:.2f}) on the {}", gpu.sumMs / gpu.samples, gpu.maxMs,
+	                                              finalImage.samples ? "final image" : "image before upscaling") :
+	                                          std::string("NR not run");
+	logger::info("[NeuralRendering] status over {:.0f} s: NR {}, real {:.1f} fps, output {:.1f} fps, {}, last NGX result 0x{:08X}", seconds,
+		magic_enum::enum_name(publishedState.load(std::memory_order_relaxed)), statusFrames / seconds,
+		(statusPresented ? statusPresented : statusFrames) / seconds, gpuText, lastNgxResult[0].load(std::memory_order_relaxed));
+	statusFrames = statusPresented = 0;
+}
 void NeuralRendering::ResetHistory() { resetHistory = true; }
 void NeuralRendering::ClearShaderCache() { retryRequested = clearShaders = resetHistory = true; }
 
@@ -2225,6 +2287,7 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, Placement placement, flo
 	if (std::exchange(finalRequest.pending, false) && finalMissed++ == 0)
 		logger::info("[NeuralRendering] final-image pass skipped on frame {}: DLSS-G did not compose that frame", finalRequest.frame);
 	enabled = ApplyTestCycle(enabled, placement);
+	ReportStatus();
 	if (placement == Placement::kFinalImage) {
 		const char* unavailable = FinalImageUnavailableReason();
 		if (unavailable != finalUnavailableLogged) {
@@ -2523,6 +2586,7 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, Placement placement, flo
 			const auto luid = work.interop.AdapterLuid();
 			PublishStatus(Status::State::kActive, FormatActiveStatus(runtime, false));
 			logger::info("[NeuralRendering] active before upscaling: runtime {} on adapter LUID {:08X}:{:08X}", runtime, luid.HighPart, luid.LowPart);
+			LogTesterSummary("before upscaling", runtime, boundedTuning, work.mix, work.width, work.height, work.width, work.height);
 			// Every start, at load or switched back on, gets its own test capture once the history settles.
 			if (testCaptureFrames.load(std::memory_order_relaxed))
 				testCaptureAt = appliedFrames.load(std::memory_order_relaxed) + kTestCaptureAfterFrames;
@@ -2604,6 +2668,7 @@ void NeuralRendering::DrawOnFinalImage(ID3D11Texture2D* a_hudless, ID3D11Unorder
 			PublishStatus(Status::State::kActive, FormatActiveStatus(runtime, true));
 			logger::info("[NeuralRendering] active on the final image: runtime {}, {}x{} (model {}x{}) from a {}x{} render", runtime, pass.outputWidth,
 				pass.outputHeight, pass.width, pass.height, request.renderWidth, request.renderHeight);
+			LogTesterSummary("final image", runtime, request.tuning, request.mix, pass.width, pass.height, pass.outputWidth, pass.outputHeight);
 			// Every start gets its own test capture once the history settles, as before upscaling.
 			if (testCaptureFrames.load(std::memory_order_relaxed))
 				testCaptureAt = appliedFrames.load(std::memory_order_relaxed) + kTestCaptureAfterFrames;

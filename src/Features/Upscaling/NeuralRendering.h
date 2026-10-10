@@ -248,6 +248,14 @@ private:
 	 *        placements alternating, a run turn also sets a_placement.
 	 */
 	bool ApplyTestCycle(bool a_enabled, Placement& a_placement);
+	/**
+	 * @brief Once a minute while the test cycle is off: one status line for testers' logs (NR state, real and output
+	 *        fps, NR GPU time, the last NGX result). Counted once per engine frame.
+	 */
+	void ReportStatus();
+	/** @brief The status line's window: its start, frames and DLSS-G presents, and the engine frame last counted. */
+	std::chrono::steady_clock::time_point statusWindowStart{};
+	uint32_t statusFrames = 0, statusPresented = 0, statusLastFrame = UINT32_MAX;
 	/** @brief What this frame's DrawBeforeUpscaling handed to the final-image pass; cleared once it runs. */
 	struct FinalRequest
 	{

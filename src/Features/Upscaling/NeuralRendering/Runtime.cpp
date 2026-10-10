@@ -204,7 +204,7 @@ namespace NR
 		 *        under the type it was set with and reads a mismatched type as the default, so a tuning key
 		 *        that shows only under the other type, or not at all, never reached the model.
 		 */
-		void LogParameterReadBack(NVSDK_NGX_Parameter* parameters, uint32_t eyeIndex)
+		void LogParameterReadBack(NVSDK_NGX_Parameter* parameters, uint32_t eyeIndex, const Tuning& tuning)
 		{
 			static constexpr const char* keys[] = { "DLSSNR.Style", "DLSSNR.Intensity", "DLSSNR.LocalToneStrength",
 				"DLSSNR.LocalStructureStrength", "DLSSNR.SkinStructureStrength", "DLSSNR.UseAutoMask", "DLSSNR.UICorrection",
@@ -223,6 +223,31 @@ namespace NR
 					!floatSafe ? "fault" : NVSDK_NGX_SUCCEED(floatResult) ? std::format("{:.3f}", asFloat) : "-");
 			}
 			logger::info("[NeuralRendering] Eye {} parameters as read back after the first evaluate:{}", eyeIndex, table);
+
+			// One verdict line for testers' logs: does each tuning key hold the value that was set?
+			std::string mismatches;
+			const auto checkFloat = [&](const char* key, float expected) {
+				float actual = 0.0f;
+				NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
+				if (!Util::SehGuarded([&] { result = parameters->Get(key, &actual); }) || NVSDK_NGX_FAILED(result) || std::abs(actual - expected) > 1e-4f)
+					mismatches += std::format(" {} (set {:.3f}, read {})", key, expected, NVSDK_NGX_SUCCEED(result) ? std::format("{:.3f}", actual) : "nothing");
+			};
+			const auto checkUInt = [&](const char* key, unsigned int expected) {
+				unsigned int actual = 0;
+				NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
+				if (!Util::SehGuarded([&] { result = parameters->Get(key, &actual); }) || NVSDK_NGX_FAILED(result) || actual != expected)
+					mismatches += std::format(" {} (set {}, read {})", key, expected, NVSDK_NGX_SUCCEED(result) ? std::to_string(actual) : "nothing");
+			};
+			checkUInt("DLSSNR.Style", tuning.style);
+			checkFloat("DLSSNR.Intensity", tuning.intensity);
+			checkFloat("DLSSNR.LocalToneStrength", tuning.localToneStrength);
+			checkFloat("DLSSNR.LocalStructureStrength", tuning.localStructureStrength);
+			checkFloat("DLSSNR.SkinStructureStrength", tuning.skinStructureStrength);
+			checkUInt("DLSSNR.UseAutoMask", tuning.useAutoMask ? 1u : 0u);
+			if (mismatches.empty())
+				logger::info("[NeuralRendering] Eye {} read-back check: OK, every tuning key holds its value", eyeIndex);
+			else
+				logger::warn("[NeuralRendering] Eye {} read-back check: MISMATCH{}", eyeIndex, mismatches);
 		}
 
 		/** @brief Writes the appearance parameters Feature 18 needs at creation and evaluation. */
@@ -609,7 +634,7 @@ namespace NR
 		const auto result = GuardNgxCall(NVSDK_NGX_Result_Fail, [&] { return state.evaluate(commands, eye.feature.get(), parameters, nullptr); });
 		frame.result = static_cast<uint32_t>(result);
 		if (frame.created && !NVSDK_NGX_FAILED(result))
-			LogParameterReadBack(parameters, eyeIndex);
+			LogParameterReadBack(parameters, eyeIndex, tuning);
 		return !NVSDK_NGX_FAILED(result);
 	}
 }
