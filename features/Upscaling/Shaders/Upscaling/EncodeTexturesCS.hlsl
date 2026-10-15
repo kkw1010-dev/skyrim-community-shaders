@@ -66,7 +66,7 @@ RWTexture2D<float> DepthOutput : register(u3);
 #else
 	// Undilated motion for the other consumers (Neural Rendering's guides), as Open Shaders writes it.
 	// The FSR pass binds no UAV here, so its writes are discarded.
-	MotionVectorOutput[dispatchID.xy] = MotionVectorMask[srcCoord];
+	MotionVectorOutput[dispatchID.xy] = MotionVectorMask[dispatchID.xy];
 #endif
 
 #if defined(DEPTH_OUTPUT)

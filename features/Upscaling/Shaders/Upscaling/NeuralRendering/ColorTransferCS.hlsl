@@ -129,14 +129,14 @@ float3 NeutwoEncode(float3 value)
 
 float3 ProductionToLinear(float3 nativeColor)
 {
-	float3 linearColor = ENABLE_LL ? nativeColor : Color::SkyrimGammaToLinear(nativeColor);
-	return (ENABLE_LL && ENABLE_ACEScg) ? AP1TosRGB(linearColor) : linearColor;
+	float3 linearColor = NR::kLinearLighting ? nativeColor : Color::SkyrimGammaToLinear(nativeColor);
+	return (NR::kLinearLighting && NR::kACEScg) ? AP1TosRGB(linearColor) : linearColor;
 }
 
 float3 ProductionFromLinear(float3 linearColor)
 {
-	float3 working = (ENABLE_LL && ENABLE_ACEScg) ? sRGBToAP1(linearColor) : linearColor;
-	return ENABLE_LL ? working : Color::LinearToSkyrimGamma(max(working, 0.0));
+	float3 working = (NR::kLinearLighting && NR::kACEScg) ? sRGBToAP1(linearColor) : linearColor;
+	return NR::kLinearLighting ? working : Color::LinearToSkyrimGamma(max(working, 0.0));
 }
 
 float3 ToLinear(float3 value)

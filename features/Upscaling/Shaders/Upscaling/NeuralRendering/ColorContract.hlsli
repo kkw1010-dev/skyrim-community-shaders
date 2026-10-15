@@ -1,7 +1,7 @@
 #ifndef __NR_COLOR_CONTRACT_HLSLI__
 #define __NR_COLOR_CONTRACT_HLSLI__
 
-// Include after Common/Color.hlsli: ENABLE_LL selects the gain's output domain.
+// Include after ColorCompat.hlsli: NR::kLinearLighting selects the gain's output domain.
 namespace NR
 {
 	// Tone clamp in stops: bounded so a bad model frame cannot blow out the frame.
@@ -12,7 +12,7 @@ namespace NR
 	{
 		tone = isfinite(tone) ? tone : 0.0;
 		float gain = exp2(clamp(tone, -maxToneStops, maxToneStops));
-		return ENABLE_LL ? gain : Color::LinearToSkyrimGamma(gain);
+		return kLinearLighting ? gain : Color::LinearToSkyrimGamma(gain);
 	}
 }
 
