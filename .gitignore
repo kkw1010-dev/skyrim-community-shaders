@@ -12,3 +12,6 @@ shadertoolsconfig.json
 .claude/settings.local.json
 
 **/__pycache__/
+
+# NVIDIA DLSS Neural Rendering runtime: proprietary, personal use only, never in the repo or a package
+nvngx_dlssnr*.dll

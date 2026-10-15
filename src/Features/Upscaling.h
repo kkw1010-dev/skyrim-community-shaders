@@ -4,6 +4,7 @@
 #include "Upscaling/DX12SwapChain.h"
 #include "Upscaling/FidelityFX.h"
 #include "Upscaling/RCAS/RCAS.h"
+#include "Upscaling/NeuralRendering.h"
 #include "Upscaling/Streamline.h"
 #include <chrono>
 #include <d3d11_4.h>
@@ -80,7 +81,38 @@ public:
 		bool reflexUseMarkersToOptimize = false;
 		bool reflexUseFPSLimit = false;
 		float reflexFPSLimit = 60.0f;
+		// DLSS Neural Rendering (NGX Feature 18), ported from Open Shaders; off until the user enables it.
+		bool neuralRenderingEnabled = false;
+		// Where NR runs: 0 before upscaling (Open Shaders' placement), 1 on the final image (NeuralRendering::Placement).
+		// Default: the final image, the user's choice after run set 7.
+		uint32_t neuralRenderingPlacement = 1;
+		// Share of NR's edit shown, 0 to 2: above 1 extrapolates it.
+		float neuralRenderingMix = 1.0f;
+		NR::Context::Profiles neuralRenderingContexts;
+		NR::Tuning neuralRenderingTuning;
+		// Test aid: frames of the once-per-session before/after NR capture (0 = off, at most 8).
+		uint32_t neuralRenderingTestCaptureFrames = 0;
+		// Test aid: true keeps stage 1's unit white point for the NR proxy instead of the scene exposure.
+		bool neuralRenderingUnitExposure = false;
+		// Test aid: with the test capture on, NR switches itself on and off in turns of this many seconds (0 = off, at least 10).
+		uint32_t neuralRenderingTestCycleSeconds = 0;
+		// Test aid: the test cycle's NR turns alternate before upscaling and the final image.
+		bool neuralRenderingTestCyclePlacements = false;
+		// Test aid: the test cycle's NR turns step through run set 6's variants (skin structure, tone transfer, no depth).
+		bool neuralRenderingTestCycleVariants = false;
+		// Test aid: the test cycle's NR turns run on the final image at each of run set 7's working scales.
+		bool neuralRenderingTestCycleScales = false;
+		// Test aid: the test cycle's NR turns step through run set 8's mix x local tone / structure pairs on the final image.
+		bool neuralRenderingTestCycleMixes = false;
+		// Test aid: the test cycle steps through CS feature conditions (PP and lighting A/B), NR on then off in each.
+		bool neuralRenderingTestCycleConditions = false;
 	};
+
+	/** @brief The saved NR placement, clamped to a known one. */
+	NeuralRendering::Placement GetNeuralRenderingPlacement() const
+	{
+		return static_cast<NeuralRendering::Placement>(std::min(settings.neuralRenderingPlacement, NeuralRendering::kMaxPlacement));
+	}
 
 	Settings settings;
 
@@ -162,6 +194,13 @@ public:
 	virtual void Load() override;
 	virtual void PostPostLoad() override;
 	virtual void SetupResources() override;
+	/** @brief Propagates frame inactivity to NR temporal history. */
+	virtual void Reset() override { neuralRendering.Reset(settings.neuralRenderingEnabled, settings.neuralRenderingTuning.regionOfInterest, settings.neuralRenderingTuning.regionFit, settings.neuralRenderingTuning.regionGroup); }
+	/**
+	 * @brief The Neural Rendering hotkey: flips the same setting as the panel's checkbox, effective on the
+	 *        next frame. Switching on is refused, with a log line, while the runtime cannot load.
+	 */
+	void ToggleNeuralRendering();
 
 	UpscaleMethod GetUpscaleMethod() const;
 	FrameGenMethod GetFrameGenMethod() const;
@@ -177,6 +216,23 @@ public:
 
 	winrt::com_ptr<ID3D11ComputeShader> encodeTexturesCS[4];  // One for each UpscaleMethod (kNONE, kTAA, kFSR, kDLSS)
 	ID3D11ComputeShader* GetEncodeTexturesCS();
+
+	/** @brief Encoder outputs a caller binds; selects the permutation. */
+	enum class EncodeOutput : uint8_t
+	{
+		kMasksOnly,
+		kTypedDepth,  // converts R24G8_TYPELESS depth to R32_FLOAT
+		kCount
+	};
+
+	/** @brief Encoder permutations for callers outside the upscale pass (Neural Rendering's guides). */
+	Util::LazyShader<ID3D11ComputeShader> encodeTexturesCSVariants[4][static_cast<size_t>(EncodeOutput::kCount)];
+	ID3D11ComputeShader* GetEncodeTexturesCS(UpscaleMethod a_method, EncodeOutput a_output);
+
+	/** @brief The encoder's four inputs in slot order: TAA mask, normals, motion vectors, depth. */
+	using EncodeInputViews = std::array<ID3D11ShaderResourceView*, 4>;
+	/** @brief Fills the encoder inputs; on failure names the missing one in a_missing. */
+	bool GetEncodeInputs(EncodeInputViews& a_views, const char*& a_missing) const;
 
 	winrt::com_ptr<ID3D11PixelShader> depthRefractionUpscalePS;
 	ID3D11PixelShader* GetDepthRefractionUpscalePS();
@@ -213,6 +269,8 @@ public:
 	static inline FidelityFX fidelityFX;      ///< AMD FSR frame generation
 	static inline DX12SwapChain dx12SwapChain;
 	static inline RCAS rcas;  ///< Standalone RCAS sharpening for DLSS
+
+	NeuralRendering neuralRendering;  ///< DLSS Neural Rendering, before upscaling or on the final image (opt-in)
 
 	winrt::com_ptr<ID3D11PixelShader> copyDepthToSharedBufferPS;
 

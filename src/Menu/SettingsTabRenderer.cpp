@@ -410,6 +410,12 @@ void SettingsTabRenderer::RenderKeybindingsTab(
 			state.settingEffects11EditorKey,
 			"Change##Effects11Editor");
 
+		Util::InputComboWidget(
+			T("menu.settings.neural_rendering_toggle_key", "Neural Rendering Toggle Key:"),
+			settings.NeuralRenderingToggleKey,
+			state.settingNeuralRenderingToggleKey,
+			"Change##NeuralRenderingToggle");
+
 		MenuFonts::EndTabItem();
 	}
 }

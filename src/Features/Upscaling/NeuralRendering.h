@@ -1,0 +1,354 @@
+#pragma once
+
+#include "NeuralRendering/ActorRegion.h"
+#include "NeuralRendering/ContextProfile.h"
+#include "NeuralRendering/CropCalibration.h"
+#include "NeuralRendering/Diagnostics.h"
+#include "NeuralRendering/Runtime.h"
+#include "NeuralRendering/Tuning.h"
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
+#include <string>
+
+/** @brief Applies one NGX Neural Rendering pass: before upscaling at render resolution, or on the final image. */
+struct NeuralRendering
+{
+	/** @brief What NR is doing, as the settings panel and devbench report it. */
+	struct Status
+	{
+		enum class State : uint8_t
+		{
+			kOff,        ///< Switched off.
+			kStarting,   ///< Enabled; the runtime initializes on the first world frame.
+			kActive,     ///< Running; text names the runtime version.
+			kSuspended,  ///< Enabled but dialogue-only gating holds it; resources and runtime stay alive.
+			kFailed      ///< Latched; text is the failure reason.
+		};
+		State state = State::kOff;
+		/** @brief Plain-language line for the settings panel and the devbench query; empty until the first publish. */
+		std::string text;
+		/** @brief Accepted nvngx_dlssnr.dll version; empty until the runtime initializes. */
+		std::string runtimeVersion;
+		/** @brief Per-eye render width NR last created its pass resources for. */
+		uint32_t width = 0;
+		/** @brief Render height NR last created its pass resources for. */
+		uint32_t height = 0;
+		/** @brief Eye count: 1 on flat, 2 on VR. */
+		uint32_t eyes = 0;
+		/** @brief Engine frame of the last frame NR applied; UINT32_MAX before the first. */
+		uint32_t lastAppliedFrame = UINT32_MAX;
+		/** @brief Frames NR has applied since startup. */
+		uint32_t appliedFrames = 0;
+		/** @brief Per-eye NGX result code of the last applied frame. */
+		std::array<uint32_t, 2> ngxResult{};
+		/** @brief True while a failure is latched; the next successful frame clears it. */
+		bool failed = false;
+		/** @brief True when the material lane is present and the graded protection has not been rejected or degraded. */
+		bool materialStrengthAvailable = true;
+		/** @brief True when the last evaluate bound the graded material protection. */
+		bool materialStrengthActive = false;
+		/** @brief Strengths bound by the last evaluate, indexed by NeuralRenderingCategory id: None, Skin, Hair, Eyes, Foliage, Landscape. */
+		std::array<float, 6> materialStrength{};
+		/** @brief Edge-softness radius bound by the last evaluate, in pixels. */
+		uint32_t materialEdgeSoftness = 0;
+	};
+
+	/** @brief Which sources chose the crop NR last evaluated, as the settings panel and devbench report it. */
+	enum class RegionSource : uint8_t
+	{
+		kNone,   ///< The whole frame: no tracked actor and no fovea clip.
+		kActor,  ///< The tracked actor's crop alone.
+		kFovea,  ///< The fovea clip alone.
+		kBoth    ///< The fovea clip intersected with the tracked actor's crop.
+	};
+
+	/** @brief Stable name for the region-source diagnostic. */
+	static const char* RegionSourceName(RegionSource a_source);
+
+	/** @brief Where in the frame NR runs; saved as its number. */
+	enum class Placement : uint8_t
+	{
+		kBeforeUpscaling,  ///< Open Shaders' placement: the render-resolution scene before DLSS/FSR, luminance only.
+		kFinalImage        ///< After upscaling and tone mapping, on DLSS-G's HUD-less frame at output resolution.
+	};
+	/** @brief Highest saved placement number. */
+	static constexpr uint32_t kMaxPlacement = 1;
+	/** @brief Log and test-file name of a placement. */
+	static const char* PlacementName(Placement a_placement);
+
+	/** @brief True while the dialogue menu is open; dialogue-only gating evaluates NR only then. */
+	static bool DialogueOpen();
+
+	NeuralRendering();
+	~NeuralRendering();
+	/** @brief Installs the main-thread hook that tracks the actor NR scopes its evaluation to. */
+	void InstallHooks();
+	/** @brief Schedules recreation on the rendering thread. */
+	void SetupResources();
+	/** @brief Invalidates both temporal histories on loading or setting changes. */
+	void ResetHistory();
+	/** @brief Discards history when NR or the world is inactive, and mirrors the crop controls for the main thread. */
+	void Reset(bool enabled, bool regionOfInterest, uint32_t cropFit, bool cropGroup);
+	/**
+	 * @brief Republishes the tracked actor's per-eye crop; runs on the main thread.
+	 *        Crop pixels are NR's render pixels, not the screen's, and the hook measures nothing
+	 *        until NR is active, so it reads no engine state before the device exists.
+	 */
+	void UpdateRegionOfInterest();
+	/** @brief Drives one frame of the calibration sweep: forces the current crop and times NR. */
+	void UpdateCalibration();
+	/** @brief Invalidates the cached existing upscaling encoder. */
+	void ClearShaderCache();
+	/**
+	 * @brief Draws Upscaling's NR tuning, retry controls, and runtime status.
+	 * @param placement Saved Placement number.
+	 * @param mix Share of NR's result shown, 0 to 1.
+	 */
+	void DrawSettings(bool& enabled, uint32_t& placement, float& mix, NR::Context::Profiles& contexts, NR::Tuning& tuning);
+	/** @brief Draws the runtime DLL's verdict and how to fix it, under Upscaling's DLL tables. */
+	void DrawRuntimeDiagnostics() const;
+	/**
+	 * @brief Replaces active kMAIN eye regions before upscaling and frame-generation capture, or, for the
+	 *        final-image placement, runs NR's start-up and schedules DrawOnFinalImage for this frame.
+	 * @param placement The saved placement; the final image falls back to before upscaling where it cannot run.
+	 * @param mix Share of NR's result shown, 0 to 1.
+	 */
+	void DrawBeforeUpscaling(bool enabled, Placement placement, float mix, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize);
+	/**
+	 * @brief The final-image placement: runs NR on DLSS-G's HUD-less frame before the UI is composed onto it,
+	 *        and writes the result back into that frame. Called by DX12SwapChain's compose pass; does nothing
+	 *        unless this frame's DrawBeforeUpscaling scheduled it.
+	 * @param a_hudless The HUD-less frame at output resolution, with its UAV.
+	 * @param a_depth The render-resolution depth DLSS-G was given, top-left in a display-size texture.
+	 * @param a_motion The render-resolution motion DLSS-G was given, laid out like a_depth.
+	 */
+	void DrawOnFinalImage(ID3D11Texture2D* a_hudless, ID3D11UnorderedAccessView* a_hudlessUAV, ID3D11ShaderResourceView* a_depth, ID3D11ShaderResourceView* a_motion);
+	/** @brief Draws the bounded scheduling diagnostics overlay. */
+	void DrawDiagnosticsOverlay();
+	/** @brief True while the developer has switched the diagnostics overlay on. */
+	bool DiagnosticsOverlayVisible() const { return diagnostics.OverlayVisible(); }
+	/** @brief Records progress through the existing post-processing chain. */
+	void RecordStage(bool finishedPost);
+	/** @brief Captures the scene immediately before the existing upscaler. */
+	void CaptureBeforeUpscaling();
+	/** @brief Captures the scene immediately after the existing upscaler. */
+	void CaptureAfterUpscaling();
+
+	/** @brief Snapshot of the current status, safe from any thread. */
+	Status GetStatus() const;
+	/** @brief Cached verdict for the runtime on disk: whether NR can start, and why not when it cannot. */
+	NR::RuntimeAvailability GetRuntimeAvailability() const;
+	/**
+	 * @brief Logs once whether nvngx_dlssnr.dll is usable, whatever the NR setting: a tester without it, or with
+	 *        another build, sees in one line that NR stays off and why, and that the rest of CS is unaffected.
+	 */
+	void LogRuntimeCheck() const;
+	/** @brief Snapshot of the tracked actor's crop, safe from any thread. */
+	Util::Region::StereoRegion GetRegionOfInterest() const;
+	/** @brief Which sources chose the crop of the last applied frame, safe from any thread. */
+	RegionSource GetRegionSource() const { return static_cast<RegionSource>(regionSource.load(std::memory_order_relaxed)); }
+	/** @brief Snapshot of the tracked actor's projected box with no padding and no stabilising, safe from any thread. */
+	Util::Region::StereoRegion GetActorBox() const;
+	/** @brief Queues a sweep of centred crop sizes that measures how NR's GPU cost falls with crop area. */
+	void RequestCalibration() { calibrationRequested.store(true, std::memory_order_relaxed); }
+	/** @brief Snapshot of the latest calibration; running, done with its measurements, or failed with why. */
+	NR::CropCalibration::Result GetCalibration() const;
+	/** @brief Cumulative NR counters since startup, safe from any thread. */
+	NR::Diagnostics::Counters GetDiagnosticCounters() const { return diagnostics.GetCounters(); }
+	/** @brief Queues one retry for the next world frame; all the Retry action does. */
+	void RequestRetry() { retryRequested = resetHistory = true; }
+	/** @brief Queues one lossless DDS capture of every NR stage in the next NR frame. */
+	void RequestCapture() { diagnostics.RequestCapture(); }
+	/**
+	 * @brief Test aid of the 05-29 port: each time NR starts (at load, or switched back on), once its
+	 *        history has settled, copy the scene before and after NR on a_frames consecutive frames (at
+	 *        most 8) and write them as DDS under CommunityShaders\Captures. Zero, the default, turns it off.
+	 */
+	void SetTestCapture(uint32_t a_frames);
+	/**
+	 * @brief Test aid: true keeps stage 1's unit white point instead of exposing NR's proxy by Post
+	 *        Processing's auto exposure or the scene key, so the two can be compared.
+	 */
+	void SetUnitExposure(bool a_unit);
+	/**
+	 * @brief Test aid: while the test capture is on, NR runs and rests in turns of a_seconds each, starting
+	 *        with a run, and asks DLSS-G for each turn's final HUD-less frame in its last 1.5 s, so an
+	 *        unattended run gets the same view with NR on and off. Each turn logs its real and output
+	 *        frame rates and NR's GPU time. Zero, the default, turns it off.
+	 * @param a_placements True makes the runs alternate placements: before upscaling, rest, final image, rest.
+	 * @param a_variants True makes the runs step through kTestCycleVariants instead (before upscaling only:
+	 *        skin structure, tone transfer, and one run without depth); it takes precedence over a_placements.
+	 * @param a_scales True makes the runs step through kTestCycleScales on the final image (run set 7); it takes
+	 *        precedence over both.
+	 */
+	void SetTestCycle(uint32_t a_seconds, bool a_placements, bool a_variants, bool a_scales, bool a_mixes, bool a_conditions);
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> impl;
+	NR::Diagnostics diagnostics;
+	std::atomic_bool resetHistory = true, recreate = false, clearShaders = false, retryRequested = false;
+	/** @brief The previous hook call's situation; NR::Context::Resolve updates it and flags the transitions that reset history. */
+	NR::Context::ContextState contextState;
+	Status status;
+	/** @brief Mirror of status.state so the per-frame paths can skip a publish without the lock. */
+	std::atomic<Status::State> publishedState{ Status::State::kOff };
+	/** @brief Engine frame of the last frame NR applied; reported live, unlike the status snapshot. */
+	std::atomic<uint32_t> appliedFrame{ UINT32_MAX };
+	/** @brief Frames NR has applied since startup; survives a rebuild, unlike Impl's own state. */
+	std::atomic<uint32_t> appliedFrames{ 0 };
+	/** @brief Per-eye NGX result of the last applied frame; survives a rebuild. */
+	std::array<std::atomic<uint32_t>, 2> lastNgxResult{};
+	/** @brief Frames the test capture copies; set from the settings, zero when off. */
+	std::atomic<uint32_t> testCaptureFrames{ 0 };
+	/** @brief appliedFrames count at which the next test capture starts; UINT32_MAX while none is due. */
+	uint32_t testCaptureAt = UINT32_MAX;
+	/** @brief Mirror of the unit-exposure test setting for the rendering thread. */
+	std::atomic_bool unitExposure = false;
+	/** @brief Length of one test-cycle turn in seconds; zero when off. */
+	std::atomic<uint32_t> testCycleSeconds{ 0 };
+	/** @brief The test cycle's runs alternate the two placements. */
+	std::atomic_bool testCyclePlacements = false;
+	/** @brief The test cycle's runs step through the variants (run set 6). */
+	std::atomic_bool testCycleVariants = false;
+	/** @brief Index into the variant table for the running turn; -1 when no variant applies. */
+	int32_t testCycleVariant = -1;
+	/** @brief The test cycle's runs step through the final-image working scales (run set 7). */
+	std::atomic_bool testCycleScales = false;
+	/** @brief Index into the working-scale table for the running turn; -1 when none applies. */
+	int32_t testCycleScale = -1;
+	/** @brief The test cycle's runs step through the mix x tone / structure table (run set 8). */
+	std::atomic_bool testCycleMixes = false;
+	/** @brief Index into the mix table for the running turn; -1 when none applies. */
+	int32_t testCycleMix = -1;
+	/** @brief The test cycle steps through CS feature conditions, NR on then off in each (PP and lighting A/B). */
+	std::atomic_bool testCycleConditions = false;
+	/** @brief The condition now applied (-1 none), the features' settings and the sharpening before the first one. */
+	int32_t testCycleCondition = -1;
+	std::unordered_map<std::string, json> testCycleOriginals;
+	float testCycleOriginalSharpness = 0.0f;
+	/** @brief Applies condition a_index (its patches on top of the saved settings) and logs it. */
+	void ApplyTestCondition(int32_t a_index);
+	/** @brief When the test cycle's first turn began, and the turn last logged (even turns run NR). */
+	std::chrono::steady_clock::time_point testCycleStart{};
+	uint32_t testCycleTurn = UINT32_MAX;
+	bool testCycleDumpRequested = false;
+	/** @brief The earlier frame of the turn's still-camera pair (variant cycle), for a flicker measure. */
+	bool testCyclePairRequested = false;
+	/** @brief Name of the running turn: "on", "off", or a placement when the placements alternate. */
+	const char* testCycleTurnName = "";
+	/**
+	 * @brief The running turn's measurement: frames and DLSS-G presents counted from kTestCycleSettleSeconds
+	 *        into the turn, so a placement switch and its history warm-up stay out of the numbers.
+	 */
+	std::chrono::steady_clock::time_point testCycleWindowStart{};
+	uint32_t testCycleWindowFrames = 0;
+	uint64_t testCycleWindowPresented = 0;
+	bool testCycleWindowOpen = false;
+	/** @brief Engine frame last counted, so a second post-processing call in one frame is not counted twice. */
+	uint32_t testCycleCountedFrame = UINT32_MAX;
+	/** @brief Reflex's PC latency and GPU frame interval over the turn's window, summed over its frame reports. */
+	double testCycleLatencyMs = 0.0, testCycleGpuFrameMs = 0.0;
+	uint32_t testCycleLatencyReports = 0;
+	/** @brief Logs the running turn's frame rates and NR GPU time, then starts the next turn's counts. */
+	void ReportTestCycleTurn(std::chrono::steady_clock::time_point a_now);
+	/**
+	 * @brief The test cycle's say on this frame: a_enabled, or false during a resting turn; with the
+	 *        placements alternating, a run turn also sets a_placement.
+	 */
+	bool ApplyTestCycle(bool a_enabled, Placement& a_placement);
+	/**
+	 * @brief Once a minute while the test cycle is off: one status line for testers' logs (NR state, real and output
+	 *        fps, NR GPU time, the last NGX result). Counted once per engine frame.
+	 */
+	void ReportStatus();
+	/** @brief The status line's window: its start, frames and DLSS-G presents, and the engine frame last counted. */
+	std::chrono::steady_clock::time_point statusWindowStart{};
+	uint32_t statusFrames = 0, statusPresented = 0, statusLastFrame = UINT32_MAX;
+	/** @brief What this frame's DrawBeforeUpscaling handed to the final-image pass; cleared once it runs. */
+	struct FinalRequest
+	{
+		bool pending = false;
+		uint32_t frame = 0, renderWidth = 0, renderHeight = 0, reset = 0, options = 0;
+		float mix = 1.0f;
+		NR::Tuning tuning;
+	};
+	FinalRequest finalRequest;
+	/** @brief Placement of the last applied frame; a change republishes the active status. */
+	Placement activePlacement = Placement::kBeforeUpscaling;
+	/** @brief Scheduled final-image frames DLSS-G's compose pass never ran, since the last one that ran. */
+	uint32_t finalMissed = 0;
+	/** @brief The final-image placement was asked for but cannot run here; logged once per reason change. */
+	const char* finalUnavailableLogged = nullptr;
+	/** @brief Why the final-image placement cannot run this frame, or nullptr when it can. */
+	static const char* FinalImageUnavailableReason();
+	mutable std::mutex statusMutex;
+	/** @brief True while the region-of-interest toggle is on and NR is enabled; the hook's off switch. */
+	std::atomic_bool regionEnabled = false;
+	/** @brief How the crop is fit to the projected bounds, mirrored from the tuning like regionEnabled. */
+	std::atomic<uint32_t> regionFit{ NR::Tuning::kRegionFitPadded };
+	/** @brief Whether the crop covers several actors, mirrored from the tuning like regionEnabled. */
+	std::atomic_bool regionGroup = false;
+	/** @brief Which sources chose the crop of the last applied frame; published for the diagnostics. */
+	std::atomic<uint32_t> regionSource{ static_cast<uint32_t>(RegionSource::kNone) };
+	/**
+	 * @brief Set when an NGX or SEH fault with the graded material protection bound turns that path
+	 *        off for this session; the user's saved value is untouched, and only a relaunch clears it.
+	 */
+	std::atomic_bool materialStrengthRejected = false;
+	/** @brief Material-strength mirrors for the status snapshot, written on the render thread. */
+	std::atomic_bool materialStrengthActive = false, materialStrengthAvailable = true;
+	std::array<std::atomic<float>, 6> materialStrengthValues{};
+	std::atomic<uint32_t> materialEdgeSoftness = 0;
+	/** @brief The tracked actor's crop, written by the main thread and read by the rendering thread. */
+	Util::Region::StereoRegion region;
+	/**
+	 * @brief The tracked actor's own projected box, written with region but never stabilised: it is the
+	 *        raw pick, so a crop that flaps around the actor stays visible instead of being smoothed away.
+	 */
+	Util::Region::StereoRegion actorBox;
+	/** @brief Holds the crop steady across jitter; advanced only on the main thread inside UpdateRegionOfInterest. */
+	Util::Region::RegionStabilizer regionStabilizer{ NR::ActorRegion::kStabilizerPolicy };
+	/**
+	 * @brief Actor the crop followed on the previous frame; candidates score against it for stickiness.
+	 *        Written and read only on the main thread inside UpdateRegionOfInterest, never by the
+	 *        rendering thread, so it needs no lock.
+	 */
+	RE::ActorHandle trackedActor;
+	mutable std::mutex regionMutex;
+	/** @brief Set by the settings button or DevBench; the main-thread hook starts the sweep on its next frame. */
+	std::atomic_bool calibrationRequested = false;
+	/** @brief Main-thread sweep state; its published copy is guarded by regionMutex. */
+	NR::CropCalibration calibration;
+	/** @brief Captured GPU frame the sweep last sampled, so one capture is never counted twice. */
+	uint32_t lastCalibrationGpuFrame = 0;
+	NR::CropCalibration::Result calibrationResult;
+	/** @brief Crop area share the last completed calibration found free, or zero; read by the main-thread tracker only. */
+	float calibratedKneeFraction = 0.0f;
+	/** @brief Draws the settings panel's crop preview: the NR-resolution scene with the per-eye crops. */
+	void DrawRegionPreview();
+	/** @brief Publishes a status line plus the run state the panel and devbench report. */
+	void PublishStatus(Status::State state, std::string text);
+	/** @brief Republishes the render size and eye count after the pass resources are recreated. */
+	void PublishResources();
+	/** @brief PublishResources' body, for a caller that already holds statusMutex. */
+	void PublishResourcesLocked();
+	/** @brief Publishes a failure with the prefix the panel shows for a stopped pass. */
+	void PublishFailure(const std::string& detail);
+	/** @brief Latches a failure, tearing the runtime down first when the device was removed. */
+	void LatchFailure();
+	/**
+	 * @brief Handles an NGX or SEH failure raised while the graded material protection was bound:
+	 *        turns the setting off for this session without touching the saved setting, so the next
+	 *        frame evaluates unprotected instead of latching the whole pass. A removed device is not
+	 *        the protection's fault and is left to the normal latch.
+	 * @return True when the failure was the protection's and has been handled.
+	 */
+	bool RevertMaterialStrengthOnFailure(const char* detail);
+	/** @brief Last member: it must be destroyed before impl's NGX teardown at process exit. */
+	NR::TerminationSentinel terminationSentinel;
+};

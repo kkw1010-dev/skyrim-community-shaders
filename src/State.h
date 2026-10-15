@@ -349,6 +349,8 @@ public:
 	 * @param a_prepass Whether this is a prepass rendering phase.
 	 */
 	void UpdateSharedData(bool a_inWorld, bool a_prepass);
+	/** @brief Binds SharedData (b5) and, optionally, FeatureData (b6) for a compute pass. */
+	void BindSharedDataCS(ID3D11DeviceContext* a_context, bool a_withFeatureData = true) const;
 	/**
 	 * @brief Updates sky shader permutation based on the current render pass.
 	 * @param a_pass The render pass to inspect.
@@ -389,6 +391,9 @@ public:
 
 	ConstantBuffer* sharedDataCB = nullptr;
 	ConstantBuffer* featureDataCB = nullptr;
+
+	// Set by Deferred's Main_RenderWorld hook, cleared at the start of every Present.
+	bool worldRenderedThisFrame = false;
 
 	PermutationCB permutationData{};
 	PermutationCB permutationDataPrevious{};

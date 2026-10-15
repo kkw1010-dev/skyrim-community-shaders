@@ -433,6 +433,7 @@ void Menu::Load(json& o_json)
 	loadComboList(o_json, "ScreenshotKey", settings.ScreenshotKey);
 	loadComboList(o_json, "Effects11ToggleKey", settings.Effects11ToggleKey);
 	loadComboList(o_json, "Effects11EditorKey", settings.Effects11EditorKey);
+	loadComboList(o_json, "NeuralRenderingToggleKey", settings.NeuralRenderingToggleKey);
 
 	// Legacy support: If old config has Theme data and no SelectedThemePreset, load it
 	if (o_json.contains("Theme") && o_json["Theme"].is_object() && settings.SelectedThemePreset.empty()) {
@@ -503,6 +504,7 @@ void Menu::Save(json& o_json)
 	InputCombo::ComboList::to_json(o_json["ScreenshotKey"], settings.ScreenshotKey);
 	InputCombo::ComboList::to_json(o_json["Effects11ToggleKey"], settings.Effects11ToggleKey);
 	InputCombo::ComboList::to_json(o_json["Effects11EditorKey"], settings.Effects11EditorKey);
+	InputCombo::ComboList::to_json(o_json["NeuralRenderingToggleKey"], settings.NeuralRenderingToggleKey);
 }
 
 void Menu::LoadTheme(json& o_json)
@@ -857,7 +859,8 @@ void Menu::DrawGeneralSettings()
 		.settingCSEditorToggleKey = settingCSEditorToggleKey,
 		.settingScreenshotKey = settingScreenshotKey,
 		.settingEffects11ToggleKey = settingEffects11ToggleKey,
-		.settingEffects11EditorKey = settingEffects11EditorKey
+		.settingEffects11EditorKey = settingEffects11EditorKey,
+		.settingNeuralRenderingToggleKey = settingNeuralRenderingToggleKey
 	};
 
 	// Render settings using extracted component
@@ -1110,6 +1113,7 @@ void Menu::ProcessInputEventQueue()
 						 if (globals::features::effects11.loaded)
 							 globals::features::effects11.ToggleEnabled();
 					 } },
+					{ settings.NeuralRenderingToggleKey, []() { globals::features::upscaling.ToggleNeuralRendering(); } },
 					{ settings.Effects11EditorKey, [&effects11EditorToggled]() {
 						 if (!HomePageRenderer::ShouldShowFirstTimeSetup()) {
 							 Effects11Editor::GetSingleton().Toggle();
@@ -1169,6 +1173,7 @@ void Menu::ProcessInputEventQueue()
 					{ &settings.ScreenshotKey, &settingScreenshotKey, [this](std::vector<InputCombo> keys) { settings.ScreenshotKey = keys; settingScreenshotKey = false; } },
 					{ &settings.Effects11ToggleKey, &settingEffects11ToggleKey, [this](std::vector<InputCombo> keys) { settings.Effects11ToggleKey = keys; settingEffects11ToggleKey = false; } },
 					{ &settings.Effects11EditorKey, &settingEffects11EditorKey, [this](std::vector<InputCombo> keys) { settings.Effects11EditorKey = keys; settingEffects11EditorKey = false; } },
+					{ &settings.NeuralRenderingToggleKey, &settingNeuralRenderingToggleKey, [this](std::vector<InputCombo> keys) { settings.NeuralRenderingToggleKey = keys; settingNeuralRenderingToggleKey = false; } },
 				};
 				bool handled = false;
 				for (auto& h : hotkeyActions) {
@@ -1260,7 +1265,8 @@ void Menu::ProcessInputEventQueue()
 				&settings.CSEditorToggleKey,
 				&settings.ScreenshotKey,
 				&settings.Effects11ToggleKey,
-				&settings.Effects11EditorKey
+				&settings.Effects11EditorKey,
+				&settings.NeuralRenderingToggleKey
 			};
 			bool isHotkey = ShouldSwallowInput() && std::any_of(std::begin(hotkeys), std::end(hotkeys),
 														[key](const auto* combo) { return InputCombo::MatchesKeyboardCombo(*combo, key); });
@@ -1302,7 +1308,8 @@ bool Menu::IsCapturingHotkeyInput() const
 {
 	return settingToggleKey || settingSkipCompilationKey || settingsEffectsToggle ||
 	       settingOverlayToggleKey || settingShaderBlockPrevKey || settingShaderBlockNextKey || settingCSEditorToggleKey || settingScreenshotKey || settingEffects11ToggleKey ||
-	       settingEffects11EditorKey;
+	       settingEffects11EditorKey ||
+	       settingNeuralRenderingToggleKey;
 }
 
 void Menu::addToEventQueue(KeyEvent e)

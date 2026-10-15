@@ -203,6 +203,13 @@ void State::Debug()
 	}
 }
 
+void State::BindSharedDataCS(ID3D11DeviceContext* a_context, bool a_withFeatureData) const
+{
+	constexpr UINT kSharedDataRegister = 5;
+	ID3D11Buffer* buffers[]{ sharedDataCB->CB(), featureDataCB->CB() };
+	a_context->CSSetConstantBuffers(kSharedDataRegister, a_withFeatureData ? ARRAYSIZE(buffers) : 1, buffers);
+}
+
 State::TonemapOwner State::GetTonemapOwner()
 {
 	if (tonemapOwner)
@@ -265,6 +272,7 @@ void State::Reset()
 	globals::profiler->EndFrame();
 
 	Feature::ForEachLoadedFeature("Reset", [](Feature* feature) { feature->Reset(); });
+	worldRenderedThisFrame = false;
 
 	// Cache menu open states once per frame to avoid repeated IsMenuOpen calls
 	// (each call constructs a BSFixedString, which is expensive at scale).

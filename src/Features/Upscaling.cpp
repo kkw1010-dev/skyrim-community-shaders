@@ -21,6 +21,21 @@
 
 #define I18N_KEY_PREFIX "feature.upscaling."
 
+namespace NR
+{
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Tuning, intensity, localToneStrength, localStructureStrength, skinStructureStrength,
+		skinToneStrength, hairToneStrength, eyeToneStrength, foliageToneStrength, landscapeToneStrength,
+		style, useAutoMask, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
+		materialStrength, strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape,
+		strengthOther, strengthEdgeSoftness, showMaterialMap, materialMapMode, materialMapFilter, toneTransfer, finalScale);
+}
+
+namespace NR::Context
+{
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ContextProfile, run, scope, region);
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Profiles, normal, dialogue);
+}
+
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Upscaling::Settings,
 	upscaleMethod,
@@ -41,7 +56,20 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	reflexLowLatencyBoost,
 	reflexUseMarkersToOptimize,
 	reflexUseFPSLimit,
-	reflexFPSLimit);
+	reflexFPSLimit,
+	neuralRenderingEnabled,
+	neuralRenderingPlacement,
+	neuralRenderingMix,
+	neuralRenderingContexts,
+	neuralRenderingTuning,
+	neuralRenderingTestCaptureFrames,
+	neuralRenderingUnitExposure,
+	neuralRenderingTestCycleSeconds,
+	neuralRenderingTestCyclePlacements,
+	neuralRenderingTestCycleVariants,
+	neuralRenderingTestCycleScales,
+	neuralRenderingTestCycleMixes,
+	neuralRenderingTestCycleConditions);
 
 decltype(&D3D11CreateDeviceAndSwapChain) ptrD3D11CreateDeviceAndSwapChainUpscaling;
 
@@ -538,6 +566,11 @@ void Upscaling::DrawSettings()
 		ImGui::TreePop();
 	}
 
+	if (ImGui::TreeNodeEx(T(TKEY("neural_rendering_node"), "Neural Rendering (DLSS 5, experimental)"))) {
+		neuralRendering.DrawSettings(settings.neuralRenderingEnabled, settings.neuralRenderingPlacement, settings.neuralRenderingMix, settings.neuralRenderingContexts, settings.neuralRenderingTuning);
+		ImGui::TreePop();
+	}
+
 	if (ImGui::TreeNodeEx(T(TKEY("backend_diagnostics"), "Backend Diagnostics"))) {
 		// Streamline log level selection
 		const char* logLevels[] = { "Off", "Default", "Verbose" };
@@ -553,6 +586,7 @@ void Upscaling::DrawSettings()
 		ImGui::Separator();
 		Util::DrawDllVersionTable(T(TKEY("ffx_dll_table_title"), "AMD FidelityFX DLLs (click to open folder)"), FidelityFX::PluginDir, FidelityFX::dllVersions, "ffx_dll_versions");
 		Util::DrawDllVersionTable(T(TKEY("sl_dll_table_title"), "NVIDIA Streamline DLLs (click to open folder)"), streamline.pluginDir.c_str(), Streamline::dllVersions, "sl_dll_versions");
+		neuralRendering.DrawRuntimeDiagnostics();
 		ImGui::TreePop();
 	}
 }
@@ -572,6 +606,16 @@ void Upscaling::SaveSettings(json& o_json)
 void Upscaling::LoadSettings(json& o_json)
 {
 	settings = o_json;
+	settings.neuralRenderingTuning.Sanitize();
+	settings.neuralRenderingContexts.Sanitize();
+	settings.neuralRenderingPlacement = std::min(settings.neuralRenderingPlacement, NeuralRendering::kMaxPlacement);
+	settings.neuralRenderingMix = std::isfinite(settings.neuralRenderingMix) ? std::clamp(settings.neuralRenderingMix, 0.0f, NR::Tuning::kMaxMix) : 1.0f;
+	neuralRendering.ResetHistory();
+	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
+	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
+	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements, settings.neuralRenderingTestCycleVariants,
+		settings.neuralRenderingTestCycleScales, settings.neuralRenderingTestCycleMixes,
+		settings.neuralRenderingTestCycleConditions);
 
 	// Sanitize loaded settings to ensure enum indices are valid
 	constexpr auto enumCount = 4;  // UpscaleMethod has 4 values: kNONE, kTAA, kFSR, kDLSS
@@ -619,6 +663,29 @@ void Upscaling::LoadSettings(json& o_json)
 void Upscaling::RestoreDefaultSettings()
 {
 	settings = {};
+	neuralRendering.ResetHistory();
+	neuralRendering.SetTestCapture(settings.neuralRenderingTestCaptureFrames);
+	neuralRendering.SetUnitExposure(settings.neuralRenderingUnitExposure);
+	neuralRendering.SetTestCycle(settings.neuralRenderingTestCycleSeconds, settings.neuralRenderingTestCyclePlacements, settings.neuralRenderingTestCycleVariants,
+		settings.neuralRenderingTestCycleScales, settings.neuralRenderingTestCycleMixes,
+		settings.neuralRenderingTestCycleConditions);
+}
+
+void Upscaling::ToggleNeuralRendering()
+{
+	if (!loaded)
+		return;
+	if (!settings.neuralRenderingEnabled) {
+		// The panel locks its checkbox the same way: an unloadable runtime would only latch a failure.
+		const auto availability = neuralRendering.GetRuntimeAvailability();
+		if (!availability.AllowsLoad(globals::state->IsDeveloperMode())) {
+			logger::info("[NeuralRendering] hotkey ignored: {}", availability.reason);
+			return;
+		}
+	}
+	settings.neuralRenderingEnabled = !settings.neuralRenderingEnabled;
+	neuralRendering.RequestRetry();
+	logger::info("[NeuralRendering] {} by hotkey", settings.neuralRenderingEnabled ? "on" : "off");
 }
 
 void Upscaling::DataLoaded()
@@ -629,6 +696,8 @@ void Upscaling::DataLoaded()
 	// The game defaults this to a non-zero value
 	static auto fDRClampOffset = RE::GetINISetting("fDRClampOffset:Display");
 	fDRClampOffset->data.f = 0.0f;
+
+	neuralRendering.LogRuntimeCheck();
 }
 
 void Upscaling::Load()
@@ -650,6 +719,7 @@ struct BSImageSpace_Init_FXAA
 };
 void Upscaling::PostPostLoad()
 {
+	neuralRendering.InstallHooks();
 	bool isGOG = !GetModuleHandle(L"steam_api64.dll");
 	stl::detour_thunk<MenuManagerDrawInterfaceStartHook>(REL::RelocationID(79947, 82084));
 
@@ -872,6 +942,51 @@ ID3D11ComputeShader* Upscaling::GetEncodeTexturesCS()
 	return encodeTexturesCS[methodIndex].get();
 }
 
+ID3D11ComputeShader* Upscaling::GetEncodeTexturesCS(UpscaleMethod a_method, EncodeOutput a_output)
+{
+	std::vector<std::pair<const char*, const char*>> defines;
+
+	switch (a_method) {
+	case UpscaleMethod::kDLSS:
+		defines.push_back({ "DLSS", "" });
+		break;
+	case UpscaleMethod::kFSR:
+		defines.push_back({ "FSR", "" });
+		break;
+	default:
+		break;
+	}
+
+	if (a_output == EncodeOutput::kTypedDepth)
+		defines.push_back({ "DEPTH_OUTPUT", "" });
+
+	return encodeTexturesCSVariants[(uint)a_method][(uint)a_output].Get(L"Data/Shaders/Upscaling/EncodeTexturesCS.hlsl", defines, "cs_5_0");
+}
+
+bool Upscaling::GetEncodeInputs(EncodeInputViews& a_views, const char*& a_missing) const
+{
+	auto renderer = globals::game::renderer;
+	auto& temporalAAMask = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kTEMPORAL_AA_MASK];
+	auto& normals = renderer->GetRuntimeData().renderTargets[globals::deferred->forwardRenderTargets[2]];
+	auto& motionVector = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
+	auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+
+	a_missing = nullptr;
+	if (!temporalAAMask.SRV)
+		a_missing = "TAA mask";
+	else if (!normals.SRV)
+		a_missing = "normals";
+	else if (!motionVector.SRV)
+		a_missing = "motion vectors";
+	else if (!depth.depthSRV)
+		a_missing = "depth";
+	if (a_missing)
+		return false;
+
+	a_views = { temporalAAMask.SRV, normals.SRV, motionVector.SRV, depth.depthSRV };
+	return true;
+}
+
 ID3D11PixelShader* Upscaling::GetDepthRefractionUpscalePS()
 {
 	if (!depthRefractionUpscalePS) {
@@ -1040,6 +1155,7 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 
 void Upscaling::SetupResources()
 {
+	neuralRendering.SetupResources();
 	QueryPerformanceFrequency(&qpf);
 
 	auto renderer = globals::game::renderer;
@@ -1108,8 +1224,13 @@ void Upscaling::SetupResources()
 
 void Upscaling::ClearShaderCache()
 {
+	neuralRendering.ClearShaderCache();
 	for (int i = 0; i < 4; ++i) {
 		encodeTexturesCS[i] = nullptr;  // com_ptr automatically releases
+	}
+	for (auto& methodVariants : encodeTexturesCSVariants) {
+		for (auto& variant : methodVariants)
+			variant.Reset();
 	}
 
 	depthRefractionUpscalePS = nullptr;  // com_ptr automatically releases
@@ -1859,6 +1980,14 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	auto upscaleMethod = upscaling.GetUpscaleMethod();
 	upscaling.UpdateFrameGenerationHold();
 
+	// Neural Rendering runs on the render-resolution scene before frame-generation capture and
+	// DLSS/FSR, as in Open Shaders, so both see the NR frame. In the final-image placement it only
+	// starts up and schedules here, and runs from DLSS-G's compose pass. It is a no-op while disabled.
+	const auto nrRenderSize = Util::ConvertToDynamic(globals::state->screenSize);
+	upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.GetNeuralRenderingPlacement(), upscaling.settings.neuralRenderingMix,
+		upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrRenderSize);
+	upscaling.neuralRendering.CaptureBeforeUpscaling();
+
 	const bool prepareFrameGeneration = upscaling.ShouldPrepareFrameGeneration();
 	if (prepareFrameGeneration && postProcessing.loaded)
 		postProcessing.ClearBorderMotionVectorsForFrameGen();
@@ -1866,9 +1995,11 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 	if (upscaleMethod != UpscaleMethod::kNONE && upscaleMethod != UpscaleMethod::kTAA)
 		upscaling.PerformUpscaling();
+	upscaling.neuralRendering.CaptureAfterUpscaling();
 
 	if (upscaleMethod == UpscaleMethod::kDLSS)
 		upscaling.ApplySharpening();
+	upscaling.neuralRendering.RecordStage(false);
 
 	Util::SetTemporal(upscaleMethod == UpscaleMethod::kTAA);
 
@@ -1884,6 +2015,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	if (hdrLoaded)
 		globals::features::hdrDisplay.RestoreFramebuffer();
 
+	upscaling.neuralRendering.RecordStage(true);
 	Util::SetTemporal(false);
 }
 

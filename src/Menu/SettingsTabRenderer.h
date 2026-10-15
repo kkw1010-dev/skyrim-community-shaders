@@ -35,6 +35,7 @@ public:
 		bool& settingScreenshotKey;           /**< @brief True while capturing a new screenshot key. */
 		bool& settingEffects11ToggleKey;      /**< @brief True while capturing a new Effects 11 toggle key. */
 		bool& settingEffects11EditorKey;      /**< @brief True while capturing a new Effects 11 editor key. */
+		bool& settingNeuralRenderingToggleKey;  /**< @brief True while capturing a new Neural Rendering toggle key. */
 	};
 
 	/**

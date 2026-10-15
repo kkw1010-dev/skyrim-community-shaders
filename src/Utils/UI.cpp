@@ -2457,6 +2457,8 @@ namespace Util
 				return VK_NUMPAD9;
 			case DIK_DECIMAL:
 				return VK_DECIMAL;
+			case DIK_DIVIDE:
+				return VK_DIVIDE;  // extended scan code: MapVirtualKeyEx cannot resolve it
 			case DIK_NUMPADENTER:
 				return IM_VK_KEYPAD_ENTER;
 			case DIK_RMENU:
@@ -2901,5 +2903,13 @@ namespace Util
 
 			return ImGui::SliderInt(label, value, min, max, format);
 		}
+	}
+	void DrawSelectionButtons(std::span<uint8_t> selected, const char* selectAll, const char* selectNone)
+	{
+		if (ImGui::SmallButton(selectAll))
+			std::ranges::fill(selected, uint8_t{ 1 });
+		ImGui::SameLine();
+		if (ImGui::SmallButton(selectNone))
+			std::ranges::fill(selected, uint8_t{ 0 });
 	}
 }  // namespace Util

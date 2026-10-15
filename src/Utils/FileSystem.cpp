@@ -32,6 +32,17 @@ namespace Util
 			}
 		}
 
+		std::filesystem::path SafeAbsolute(const std::filesystem::path& path)
+		{
+			std::error_code ec;
+			auto result = std::filesystem::absolute(path, ec);
+			if (ec) {
+				logger::warn("Failed to resolve absolute path for '{}': {}", path.string(), ec.message());
+				return path;
+			}
+			return result;
+		}
+
 		std::filesystem::path GetCommunityShaderPath()
 		{
 			return GetDataPath() / "SKSE" / "Plugins" / "CommunityShaders";
