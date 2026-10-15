@@ -106,6 +106,8 @@ public:
 	void ScaleUIBrightnessForFG();
 	/** @brief Returns true when the D3D12 UI buffer path should be used for frame generation. */
 	bool ShouldUseD3D12UIBuffer();
+	/** @brief True when frame generation composites the UI buffer this frame (FFX, or CS for DLSS-G). */
+	bool IsFGCompositingThisFrame() const;
 
 	/** @brief Runs the HDR output compute shader to composite scene and UI, then copies to the back buffer. */
 	void ApplyHDR();
@@ -265,7 +267,4 @@ private:
 
 	// Bind scene (t0), UI (t1, may be null), UAV (u0), CB (b0); dispatch the output CS; unbind.
 	void DispatchHDROutput(ID3D11ShaderResourceView* sceneSRV, ID3D11ShaderResourceView* uiSRV, ID3D11UnorderedAccessView* uav);
-
-	// True when FFX frame generation is actively compositing UI this frame.
-	bool IsFGCompositingThisFrame() const;
 };

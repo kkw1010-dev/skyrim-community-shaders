@@ -810,7 +810,10 @@ void HDRDisplay::RestoreFramebuffer()
 
 bool HDRDisplay::IsFGCompositingThisFrame() const
 {
-	return globals::features::upscaling.ShouldUseFrameGenerationThisFrame();
+	auto& upscaling = globals::features::upscaling;
+	// DLSS-G gets the UI only through DX12SwapChain's compose pass; without it the UI stays baked in.
+	return upscaling.ShouldUseFrameGenerationThisFrame() &&
+	       (!upscaling.UsesDLSSGFrameGen() || upscaling.dx12SwapChain.CanComposeDLSSGFrame());
 }
 
 HDRDisplay::D3D12UIBufferMode HDRDisplay::GetD3D12UIBufferMode()

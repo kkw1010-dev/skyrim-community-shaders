@@ -5,6 +5,7 @@
 #include "Upscaling/FidelityFX.h"
 #include "Upscaling/RCAS/RCAS.h"
 #include "Upscaling/Streamline.h"
+#include <chrono>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <winrt/base.h>
@@ -40,6 +41,13 @@ public:
 
 	float2 jitter = { 0, 0 };
 
+	enum class FrameGenMethod
+	{
+		kNone,
+		kFSR,
+		kDLSSG
+	};
+
 	enum class UpscaleMethod
 	{
 		kNONE,
@@ -57,6 +65,11 @@ public:
 		uint frameGenerationMode = 1;
 		uint frameGenerationForceEnable = 0;
 		bool frameGenerationAllowInMenus = false;
+		// DLSS-G is opt-in; off keeps AMD FSR frame generation.
+		bool enableDLSSFrameGen = false;
+		// Generated frames per real frame (1=2x). Clamped at apply time to the
+		// hardware-reported DLSSGState::numFramesToGenerateMax.
+		uint dlssgFramesToGenerate = 1;
 		uint streamlineLogLevel = 0;  // 0=Off, 1=Default, 2=Verbose
 		float sharpnessFSR = 0.0f;
 		bool sharpnessEnabledDLSS = false;
@@ -103,11 +116,35 @@ public:
 	// FG FPS Measurement for Overlay
 	bool IsFrameGenerationDx12PathActive() const;
 	bool IsFrameGenerationActive() const;
-	/** @brief Returns whether settings and menu state permit preparing frame-generation inputs this frame. */
+	/** @brief Returns whether settings and menu state permit frame generation, before any hold. */
+	bool FrameGenerationPermitted() const;
+	/** @brief Returns whether settings and menu state permit preparing frame-generation inputs and no hold keeps it off. */
 	bool ShouldPrepareFrameGeneration() const;
-	/** @brief Returns the frame-generation decision made in post-processing, held until the frame is presented. */
+	/**
+	 * @brief Keeps frame generation off for at least a_duration and kFrameGenerationHoldFrames post-processed frames
+	 *        from now, so DLSS-G never comes back in the same frame as the Reflex markers it needs (F001).
+	 * @param a_reason Logged when the hold starts; nullptr for the per-frame menu hold, which would flood the log.
+	 */
+	void HoldFrameGeneration(std::chrono::milliseconds a_duration, const char* a_reason);
+	/** @brief True while a hold keeps frame generation off. */
+	bool FrameGenerationHeld() const;
+	/** @brief Once per frame, before frame generation is prepared: holds it after a loading screen and while a menu blocks it. */
+	void UpdateFrameGenerationHold();
+	/** @brief Shortest hold after a loading screen or a menu, in time and in frames: both must pass. */
+	static constexpr std::chrono::milliseconds kFrameGenerationHold{ 1000 };
+	static constexpr uint32_t kFrameGenerationHoldFrames = 30;
+	/**
+	 * @brief More presented frames than this between two post-processed ones are a loading screen (or another screen
+	 *        without the world); a slow gameplay frame is still one frame, so a hitch does not start the hold.
+	 */
+	static constexpr uint32_t kFrameGenerationLoadingGapFrames = 5;
+	/** @brief The hold lasts until this time and until frameGenerationHoldFrames more frames have been post-processed. */
+	std::chrono::steady_clock::time_point frameGenerationHoldUntil{};
+	uint32_t frameGenerationHoldFrames = 0;
+	/** @brief Engine frame UpdateFrameGenerationHold last ran in; a gap in the count is a loading screen. */
+	uint32_t frameGenerationHoldUpdatedFrame = UINT32_MAX;
+	/** @brief Returns the prepared frame's generation decision until its buffers are cleared after Present. */
 	bool ShouldUseFrameGenerationThisFrame() const;
-	float GetFrameGenerationFrameTime() const;
 	bool IsUpscalingActive() const;
 
 	// Feature interface overrides
@@ -127,6 +164,12 @@ public:
 	virtual void SetupResources() override;
 
 	UpscaleMethod GetUpscaleMethod() const;
+	FrameGenMethod GetFrameGenMethod() const;
+	bool UsesDLSSGFrameGen() const;
+
+	/** @brief Real:generated frame ratio for the active FG backend -- the single source
+	 * of truth for pacing (FrameLimiter) and reporting (PerformanceOverlay). */
+	uint GetFrameGenerationMultiplier() const;
 
 	void CheckResources(UpscaleMethod a_upscalemethod);
 	void CreateUpscalingTextureResources(UpscaleMethod a_upscalemethod);
@@ -165,8 +208,9 @@ public:
 	virtual void ClearShaderCache() override;
 
 	// Static instances instead of singletons
-	static inline Streamline streamline;
-	static inline FidelityFX fidelityFX;  ///< Only for frame generation
+	static inline Streamline streamline;      ///< DX11 instance: DLSS + Reflex + PCL
+	static inline Streamline streamlineDX12;  ///< DX12 instance: DLSS-G frame generation
+	static inline FidelityFX fidelityFX;      ///< AMD FSR frame generation
 	static inline DX12SwapChain dx12SwapChain;
 	static inline RCAS rcas;  ///< Standalone RCAS sharpening for DLSS
 
@@ -226,6 +270,7 @@ public:
 	void SetProxyD3D11Device(ID3D11Device* device);
 	void SetProxyD3D11DeviceContext(ID3D11DeviceContext* context);
 	void CreateProxySwapChain(IDXGIAdapter* adapter, DXGI_SWAP_CHAIN_DESC swapChainDesc);
+	void CreateProxySwapChainDirect(IDXGIAdapter* adapter, DXGI_SWAP_CHAIN_DESC swapChainDesc);
 	void CreateProxyInterop();
 	IDXGISwapChain* GetProxySwapChain();
 
