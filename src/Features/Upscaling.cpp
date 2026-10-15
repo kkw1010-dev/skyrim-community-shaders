@@ -1983,7 +1983,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	// Neural Rendering runs on the render-resolution scene before frame-generation capture and
 	// DLSS/FSR, as in Open Shaders, so both see the NR frame. In the final-image placement it only
 	// starts up and schedules here, and runs from DLSS-G's compose pass. It is a no-op while disabled.
-	const auto nrRenderSize = Util::ConvertToDynamic(globals::state->screenSize);
+	const auto nrRenderSize = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
 	upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.GetNeuralRenderingPlacement(), upscaling.settings.neuralRenderingMix,
 		upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrRenderSize);
 	upscaling.neuralRendering.CaptureBeforeUpscaling();
