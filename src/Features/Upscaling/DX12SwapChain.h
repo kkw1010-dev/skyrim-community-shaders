@@ -159,8 +159,6 @@ public:
 	 */
 	bool WaitForFrameSlot();
 
-	UINT64 frameFenceValues[2] = {0, 0};
-
 	LARGE_INTEGER qpf;
 
 	double refreshRate = 0;
