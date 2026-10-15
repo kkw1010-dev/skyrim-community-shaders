@@ -1223,7 +1223,8 @@ struct NeuralRendering::Impl
 			for (uint32_t i = 0; i < eyeCount; ++i) {
 				auto& eye = eyes[i];
 				diagnostic.reset[i] = UpdateFrame(i, reset, diagnostic);
-				Upscaling::UpscalingDataCB data{ { float(guideWidth), float(guideHeight) }, i * guideWidth, 0 };
+				// One eye since 10-03 dropped VR: the shader's eye offset (the struct's padding) stays 0.
+				Upscaling::UpscalingDataCB data{ { float(guideWidth), float(guideHeight) }, {} };
 				encodeBuffer->Update(data);
 				auto buffer = encodeBuffer->CB();
 				context->CSSetConstantBuffers(0, 1, &buffer);
