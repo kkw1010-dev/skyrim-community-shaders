@@ -775,13 +775,13 @@ void Upscaling::CreateUpscalingTextureResources(UpscaleMethod a_upscalemethod)
 		uavDesc.Format = texDesc.Format;
 
 		if (!reactiveMaskTexture) {
-			reactiveMaskTexture = new Texture2D(texDesc);
+			reactiveMaskTexture = new Texture2D(texDesc, "Upscaling::ReactiveMask");
 			reactiveMaskTexture->CreateSRV(srvDesc);
 			reactiveMaskTexture->CreateUAV(uavDesc);
 		}
 
 		if (!transparencyCompositionMaskTexture) {
-			transparencyCompositionMaskTexture = new Texture2D(texDesc);
+			transparencyCompositionMaskTexture = new Texture2D(texDesc, "Upscaling::TransparencyCompositionMask");
 			transparencyCompositionMaskTexture->CreateSRV(srvDesc);
 			transparencyCompositionMaskTexture->CreateUAV(uavDesc);
 		}
@@ -799,7 +799,7 @@ void Upscaling::CreateUpscalingTextureResources(UpscaleMethod a_upscalemethod)
 			srvDesc.Format = texDesc.Format;
 			uavDesc.Format = texDesc.Format;
 
-			motionVectorCopyTexture = new Texture2D(motionTexDesc);
+			motionVectorCopyTexture = new Texture2D(motionTexDesc, "Upscaling::MotionVectorCopy");
 			motionVectorCopyTexture->CreateSRV(srvDesc);
 			motionVectorCopyTexture->CreateUAV(uavDesc);
 		}
@@ -820,7 +820,7 @@ void Upscaling::CreateUpscalingTextureResources(UpscaleMethod a_upscalemethod)
 			uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
 			uavDesc.Texture2D.MipSlice = 0;
 
-			sharpenerTexture = new Texture2D(texDesc);
+			sharpenerTexture = new Texture2D(texDesc, "Upscaling::Sharpener");
 			sharpenerTexture->CreateSRV(srvDesc);
 			sharpenerTexture->CreateUAV(uavDesc);
 		}
