@@ -330,10 +330,18 @@ void Streamline::PostDevice()
 	}
 
 	// DX11 instance: DLSS + Reflex + PCL
+	// DLSS counts as available only when all three entry points bind: an external CTD (2026-10-17) called a
+	// null slDLSSSetOptions after the feature reported loaded and supported. Without them, GetUpscaleMethod
+	// falls back to the non-DLSS method.
 	if (featureDLSS) {
-		slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSGetOptimalSettings", (void*&)slDLSSGetOptimalSettings);
-		slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSGetState", (void*&)slDLSSGetState);
-		slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSSetOptions", (void*&)slDLSSSetOptions);
+		bool dlssFnsBound = true;
+		dlssFnsBound &= BindFeatureFunction(sl::kFeatureDLSS, "slDLSSGetOptimalSettings", (void*&)slDLSSGetOptimalSettings);
+		dlssFnsBound &= BindFeatureFunction(sl::kFeatureDLSS, "slDLSSGetState", (void*&)slDLSSGetState);
+		dlssFnsBound &= BindFeatureFunction(sl::kFeatureDLSS, "slDLSSSetOptions", (void*&)slDLSSSetOptions);
+		if (!dlssFnsBound) {
+			featureDLSS = false;
+			logger::warn("[Streamline DX11] DLSS functions are missing; DLSS is disabled and the non-DLSS upscaler is used");
+		}
 	}
 
 	slReflexGetState = nullptr;
@@ -546,6 +554,8 @@ void Streamline::SetDLSSOptions(sl::ViewportHandle p_viewport, uint32_t width)
 	dlssOptions.preExposure = 1.0f;
 	dlssOptions.sharpness = 0.0f;
 
+	if (!slDLSSSetOptions)
+		return;
 	if (SL_FAILED(result, slDLSSSetOptions(p_viewport, dlssOptions))) {
 		logger::critical("[Streamline DX11] Could not enable DLSS");
 	}
@@ -556,6 +566,8 @@ void Streamline::EvaluateDLSS(sl::ViewportHandle vp,
 	ID3D11Resource* mvec, ID3D11Resource* reactiveMask, ID3D11Resource* transparencyMask,
 	const sl::Extent& extentIn, const sl::Extent& extentOut, uint32_t outputWidth)
 {
+	if (!slDLSSSetOptions || !slEvaluateFeature)
+		return;
 	auto context = globals::d3d::context;
 
 	sl::Resource colorInRes = { sl::ResourceType::eTex2d, colorIn, 0 };
@@ -925,6 +937,8 @@ void Streamline::DestroyDLSSResources()
 	sl::DLSSOptions dlssOptions{};
 	dlssOptions.mode = sl::DLSSMode::eOff;
 
-	slDLSSSetOptions(viewport, dlssOptions);
-	slFreeResources(sl::kFeatureDLSS, viewport);
+	if (slDLSSSetOptions)
+		slDLSSSetOptions(viewport, dlssOptions);
+	if (slFreeResources)
+		slFreeResources(sl::kFeatureDLSS, viewport);
 }
