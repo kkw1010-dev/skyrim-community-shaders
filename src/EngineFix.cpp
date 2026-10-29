@@ -1,6 +1,7 @@
 ﻿#include "EngineFix.h"
 
 #include "EngineFixes/EffectShaderNoDecalsFix.h"
+#include "EngineFixes/EmptyOverlayCullFix.h"
 #include "EngineFixes/LightListSearchFix.h"
 #include "EngineFixes/ShadowmapCascadeCullingFix.h"
 #include "EngineFixes/ShadowmapCascadeRasterizerFix.h"
@@ -11,6 +12,7 @@ const std::vector<EngineFix*>& EngineFix::GetOnPostPostLoadFixesList()
 {
 	static EffectShaderNoDecalsFix effectShaderNoDecalsFix;
 	static LightListSearchFix lightListSearchFix;
+	static EmptyOverlayCullFix emptyOverlayCullFix;
 	static ShadowmapCascadeCullingFix shadowmapCascadeCullingFix;
 	static ShadowmapRasterizerFix shadowmapRasterizerFix;
 	static SunOcclusionPollFix sunOcclusionPollFix;
@@ -19,6 +21,7 @@ const std::vector<EngineFix*>& EngineFix::GetOnPostPostLoadFixesList()
 	static std::vector<EngineFix*> fixes = {
 		&effectShaderNoDecalsFix,
 		&lightListSearchFix,
+		&emptyOverlayCullFix,
 		&shadowmapCascadeCullingFix,
 		&shadowmapRasterizerFix,
 		&sunOcclusionPollFix,
