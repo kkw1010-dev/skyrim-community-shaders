@@ -1363,7 +1363,9 @@ bool Menu::ShouldSwallowInput()
 void Menu::SyncVanityCamera()
 {
 	const bool wantDisabled = ShouldSwallowInput();
-	auto setting = RE::GetINISetting("fAutoVanityModeDelay:Camera");
+	static RE::Setting* setting = nullptr;
+	if (!setting)
+		setting = RE::GetINISetting("fAutoVanityModeDelay:Camera");
 	if (!setting)
 		return;
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -72,6 +73,10 @@ public:
 	std::unordered_map<const char*, bool> meshTextureCache;
 	// Keeps every cached key interned so its pointer cannot be recycled.
 	std::vector<RE::BSFixedString> meshTextureKeepAlive;
+	std::atomic<uint32_t> meshTextureGeneration{ 0 };
+	const char* lastMeshTextureKey = nullptr;
+	uint32_t lastMeshTextureGeneration = 0;
+	bool lastMeshTextureResult = false;
 
 	/**
 	 * @brief Resolves whether a diffuse texture name belongs to a landscape texture, memoising the result.

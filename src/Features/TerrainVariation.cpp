@@ -85,6 +85,7 @@ void TerrainVariation::DataLoaded()
 	landscapeDiffusePaths.clear();
 	meshTextureCache.clear();
 	meshTextureKeepAlive.clear();
+	meshTextureGeneration.fetch_add(1, std::memory_order_release);
 
 	auto addTextureSet = [this](RE::BGSTextureSet* textureSet) {
 		if (textureSet == nullptr) {
@@ -173,7 +174,14 @@ void TerrainVariation::BSLightingShader_SetupGeometry(RE::BSRenderPass* a_pass)
 		return;
 	}
 
-	if (IsLandscapeDiffuseTexture(baseTexture->name)) {
+	const char* key = baseTexture->name.c_str();
+	const uint32_t generation = meshTextureGeneration.load(std::memory_order_acquire);
+	if (key != lastMeshTextureKey || generation != lastMeshTextureGeneration) {
+		lastMeshTextureResult = IsLandscapeDiffuseTexture(baseTexture->name);
+		lastMeshTextureKey = key;
+		lastMeshTextureGeneration = generation;
+	}
+	if (lastMeshTextureResult) {
 		descriptor |= uint(State::ExtraFeatureDescriptors::TVMeshVariation);
 	}
 }
