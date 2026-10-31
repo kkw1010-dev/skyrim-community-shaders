@@ -3027,8 +3027,6 @@ namespace SIE
 			auto newShader = SShaderCache::CreateVertexShader(*shaderBlob, shader,
 				descriptor);
 
-			std::lock_guard lockGuard(vertexShadersMutex);
-
 			const auto result = device->CreateVertexShader(shaderBlob->GetBufferPointer(),
 				newShader->byteCodeSize, nullptr, reinterpret_cast<ID3D11VertexShader**>(&newShader->shader));
 			if (FAILED(result)) {
@@ -3038,6 +3036,7 @@ namespace SIE
 					newShader->shader->Release();
 				}
 			} else {
+				std::lock_guard lockGuard(vertexShadersMutex);
 				return vertexShaders[static_cast<size_t>(shader.shaderType.get())]
 				    .insert_or_assign(descriptor, std::move(newShader))
 				    .first->second.get();
@@ -3056,7 +3055,6 @@ namespace SIE
 			auto newShader = SShaderCache::CreatePixelShader(*shaderBlob, shader,
 				descriptor);
 
-			std::lock_guard lockGuard(pixelShadersMutex);
 			const auto result = device->CreatePixelShader(shaderBlob->GetBufferPointer(),
 				shaderBlob->GetBufferSize(), nullptr, reinterpret_cast<ID3D11PixelShader**>(&newShader->shader));
 			if (FAILED(result)) {
@@ -3067,6 +3065,7 @@ namespace SIE
 					newShader->shader->Release();
 				}
 			} else {
+				std::lock_guard lockGuard(pixelShadersMutex);
 				return pixelShaders[static_cast<size_t>(shader.shaderType.get())]
 				    .insert_or_assign(descriptor, std::move(newShader))
 				    .first->second.get();
@@ -3085,7 +3084,6 @@ namespace SIE
 			auto newShader = SShaderCache::CreateComputeShader(*shaderBlob, shader,
 				descriptor);
 
-			std::lock_guard lockGuard(computeShadersMutex);
 			const auto result = device->CreateComputeShader(shaderBlob->GetBufferPointer(),
 				shaderBlob->GetBufferSize(), nullptr, reinterpret_cast<ID3D11ComputeShader**>(&newShader->shader));
 			if (FAILED(result)) {
@@ -3096,6 +3094,7 @@ namespace SIE
 					newShader->shader->Release();
 				}
 			} else {
+				std::lock_guard lockGuard(computeShadersMutex);
 				return computeShaders[static_cast<size_t>(shader.shaderType.get())]
 				    .insert_or_assign(descriptor, std::move(newShader))
 				    .first->second.get();
