@@ -212,11 +212,19 @@ private:
 	uint64_t session = 0;
 	bool texturesDirty = false;
 	uint32_t lastPrune = 0;
+	// The default profile's data for body [0] and head [1], made once a frame: every lighting draw
+	// used to resolve and clamp it again.
+	std::array<SkinData, 2> defaultData{};
+	uint64_t defaultDataFrame = UINT64_MAX;
+	// What PerGeometryCB holds now: a draw with the same data keeps the buffer instead of mapping it.
+	PerGeometryData uploadedPerGeometry{};
+	bool perGeometryUploaded = false;
 
 	void Invalidate(bool a_resources = false);
 	std::shared_ptr<TextureEntry> RequestTexture(const std::string& a_path);
 	void Prepare(GeometryEntry& a_entry, const SkinActors::Snapshot& a_state);
 	SkinData MakeData(const SkinMaterials::Material& a_material, bool a_head) const;
+	const SkinData& DefaultData(bool a_head);
 	GeometryEntry& Observe(RE::BSGeometry* a_geometry, RE::BSShaderProperty* a_property);
 	void UpdateEditorPreview();
 	void DrawCharacterStorageStatus();

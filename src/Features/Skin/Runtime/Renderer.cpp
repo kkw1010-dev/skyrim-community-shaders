@@ -5,12 +5,14 @@
 #include "State.h"
 
 #include <cmath>
+#include <cstring>
 
 using namespace SkinMaterials;
 
 void Skin::Invalidate(bool a_resources)
 {
 	++revision;
+	defaultDataFrame = UINT64_MAX;
 	if (a_resources) {
 		textures.clear();
 		resourceRevisions.clear();
@@ -25,6 +27,7 @@ void Skin::SetupResources()
 	RestoreSampler();
 	detailSampler = nullptr;
 	PerGeometryCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<PerGeometryData>(), "Skin::PerGeometryCB");
+	perGeometryUploaded = false;
 	D3D11_SAMPLER_DESC sampler{};
 	sampler.Filter = D3D11_FILTER_ANISOTROPIC;
 	sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
@@ -269,6 +272,17 @@ Skin::SkinData Skin::MakeData(const Material& a_material, bool a_head) const
 	return data;
 }
 
+const Skin::SkinData& Skin::DefaultData(bool a_head)
+{
+	const uint64_t frame = globals::state->frameCount;
+	if (defaultDataFrame != frame) {
+		defaultData[0] = MakeData(Resolve({}, settings.DefaultProfile), false);
+		defaultData[1] = MakeData(Resolve({}, settings.DefaultProfile), true);
+		defaultDataFrame = frame;
+	}
+	return defaultData[a_head ? 1 : 0];
+}
+
 Skin::SkinData Skin::GetCommonBufferData()
 {
 	std::lock_guard lock(mutex);
@@ -295,13 +309,13 @@ void Skin::BSLightingShader_SetupGeometry(RE::BSRenderPass* a_pass)
 	if (!PerGeometryCB)
 		return;
 	PerGeometryData data{};
-	data.profile = MakeData(Resolve({}, settings.DefaultProfile), false);
+	data.profile = DefaultData(false);
 	data.profile.skinParams.w = 0;
 	if (a_pass && a_pass->geometry) {
 		data.skinPerGeometry = GetWetness(a_pass->geometry);
 		if (SkinMaterials::IsCompatible(a_pass->shaderProperty)) {
 			auto& entry = Observe(a_pass->geometry, a_pass->shaderProperty);
-			data.profile = MakeData(Resolve({}, settings.DefaultProfile), entry.head);
+			data.profile = DefaultData(entry.head);
 			data.profile.skinDetailParams.w = 0;
 			if (entry.ready && entry.revision == revision && session == SkinActors::Session() && entry.actorRevision == SkinActors::Revision()) {
 				data.profile = MakeData(entry.effective, entry.head);
@@ -318,7 +332,13 @@ void Skin::BSLightingShader_SetupGeometry(RE::BSRenderPass* a_pass)
 			}
 		}
 	}
-	PerGeometryCB->Update(data);
+	// Most lighting draws carry the same data as the draw before (no skin, no actor), and a buffer
+	// keeps its contents until the next upload: map it only when the data changed.
+	if (!perGeometryUploaded || std::memcmp(&data, &uploadedPerGeometry, sizeof(data)) != 0) {
+		PerGeometryCB->Update(data);
+		uploadedPerGeometry = data;
+		perGeometryUploaded = true;
+	}
 	ID3D11Buffer* buffer = PerGeometryCB->CB();
 	globals::d3d::context->PSSetConstantBuffers(7, 1, &buffer);
 }
