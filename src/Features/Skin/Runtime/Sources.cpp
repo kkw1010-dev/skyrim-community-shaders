@@ -1,5 +1,7 @@
 #include "Sources.h"
 #include "../Editor/NifDocument.h"
+#include "Globals.h"
+#include "Menu.h"
 
 #include <cctype>
 #include <mutex>
@@ -87,10 +89,16 @@ namespace SkinSources
 				auto asset = std::make_shared<Asset>();
 				asset->definition = SkinMaterials::ReadProperty(a_property);
 				asset->path = a_stream.inputFilePath;
-				try {
-					asset->fingerprint = SkinEditor::Fingerprint(SkinEditor::ReadResource(asset->path));
-				} catch (const std::exception& e) {
-					logger::warn("[Advanced Skin] Source snapshot unavailable: {}: {}", asset->path, e.what());
+				// The fingerprint only guards the editor's "Edit source NIF" button. Reading the whole NIF
+				// again and hashing every byte on each skin mesh load cost the main thread 1-3 % in play,
+				// so it is taken only while the menu is open; an asset loaded outside it has none, and the
+				// button asks for the file to be opened explicitly, as for any unavailable snapshot.
+				if (globals::menu && globals::menu->IsEnabled) {
+					try {
+						asset->fingerprint = SkinEditor::Fingerprint(SkinEditor::ReadResource(asset->path));
+					} catch (const std::exception& e) {
+						logger::warn("[Advanced Skin] Source snapshot unavailable: {}: {}", asset->path, e.what());
+					}
 				}
 				for (uint32_t i = 0; i < a_stream.objects.size(); ++i) {
 					if (a_stream.objects[i].get() == a_property) {
