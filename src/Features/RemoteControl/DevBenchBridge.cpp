@@ -360,6 +360,9 @@ namespace
 				auto* profiler = globals::profiler;
 				if (!profiler)
 					return json{ { "error", "profiler unavailable" } };
+				// Timing pauses while nothing shows it: keep it on for the requests that follow
+				// (a request after a pause sees the timings of the last timed frames).
+				profiler->KeepActive(600);
 				json passes = json::array();
 				for (const auto& r : profiler->GetResults()) {
 					if (!r.valid)

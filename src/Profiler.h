@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <d3d11.h>
 #include <functional>
 #include <string>
@@ -51,6 +52,15 @@ public:
 		 * @param p Percentile in [0, 100].
 		 */
 		float GetPercentile(float p) const;
+
+		/**
+		 * @brief Gets two interpolated percentiles from one sort of the buffered samples.
+		 * @param p1 First percentile in [0, 100].
+		 * @param p2 Second percentile in [0, 100].
+		 * @param out1 Receives the first percentile.
+		 * @param out2 Receives the second percentile.
+		 */
+		void GetPercentiles(float p1, float p2, float& out1, float& out2) const;
 	};
 
 	/** @brief Snapshot of GPU/CPU timing data for a single named pass. */
@@ -119,6 +129,25 @@ public:
 	/** @brief Ends the current profiling frame and advances the ring buffer write cursor. */
 	void EndFrame();
 
+	/**
+	 * @brief Turns pass timing on or off from the next frame; call it at a frame boundary.
+	 *
+	 * Off, a pass still raises its perf events but issues no queries and reads no clock, and no
+	 * results are collected: nothing shows them, and collecting cost 2-5 % of the main thread in
+	 * play (sorting every timer's history each frame).
+	 * @param a_active True while something shows the timings (the menu, the performance overlay).
+	 */
+	void SetActive(bool a_active);
+
+	/**
+	 * @brief Keeps pass timing on for the next frames, for a reader that asks on demand.
+	 * @param a_frames Number of frames to keep timing on.
+	 */
+	void KeepActive(uint32_t a_frames) { keepActiveFrames = std::max(keepActiveFrames, a_frames); }
+
+	/** @brief Whether passes are timed this frame. */
+	bool IsActive() const { return active; }
+
 	/** @brief Gets the per-pass timing results from the last collected frame. */
 	const std::vector<TimerResult>& GetResults() const { return results; }
 
@@ -177,6 +206,8 @@ private:
 	uint32_t framesSinceInit = 0;
 	bool initialized = false;
 	bool frameActive = false;
+	bool active = false;
+	uint32_t keepActiveFrames = 0;
 	double cpuTicksToMs = 0.0;
 
 	PerfEventCallback beginPerfEvent;

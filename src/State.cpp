@@ -270,6 +270,13 @@ bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_
 void State::Reset()
 {
 	globals::profiler->EndFrame();
+	// Time the passes only while something shows them: the menu (its profiling page and feature
+	// timers) or the performance overlay. DevBench asks on demand through Profiler::KeepActive.
+	{
+		auto* menu = globals::menu;
+		auto& overlay = globals::features::performanceOverlay;
+		globals::profiler->SetActive(menu && (menu->IsEnabled || (menu->overlayVisible && overlay.loaded && overlay.IsOverlayVisible())));
+	}
 
 	Feature::ForEachLoadedFeature("Reset", [](Feature* feature) { feature->Reset(); });
 	worldRenderedThisFrame = false;

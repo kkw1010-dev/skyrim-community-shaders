@@ -31,6 +31,28 @@ float Profiler::RollingHistory::GetPercentile(float p) const
 	return sorted[lo] * (1.0f - frac) + sorted[hi] * frac;
 }
 
+void Profiler::RollingHistory::GetPercentiles(float p1, float p2, float& out1, float& out2) const
+{
+	if (count == 0) {
+		out1 = out2 = lastMs;
+		return;
+	}
+
+	thread_local std::vector<float> sorted;
+	sorted.assign(history, history + count);
+	std::sort(sorted.begin(), sorted.end());
+
+	const auto at = [&](float p) {
+		float idx = (p / 100.0f) * static_cast<float>(count - 1);
+		uint32_t lo = static_cast<uint32_t>(idx);
+		uint32_t hi = std::min(lo + 1, count - 1);
+		float frac = idx - static_cast<float>(lo);
+		return sorted[lo] * (1.0f - frac) + sorted[hi] * frac;
+	};
+	out1 = at(p1);
+	out2 = at(p2);
+}
+
 void Profiler::Initialize(ID3D11Device* device, ID3D11DeviceContext* a_context)
 {
 	Release();
@@ -100,6 +122,12 @@ void Profiler::BeginPass(const std::string& name)
 	if (!initialized || !context)
 		return;
 
+	if (!active) {
+		if (beginPerfEvent)
+			beginPerfEvent(name);
+		return;
+	}
+
 	if (!frameActive)
 		BeginFrame();
 
@@ -118,7 +146,16 @@ void Profiler::BeginPass(const std::string& name)
 
 void Profiler::EndPass()
 {
-	if (!initialized || !context || !frameActive)
+	if (!initialized || !context)
+		return;
+
+	if (!active) {
+		if (endPerfEvent)
+			endPerfEvent({});
+		return;
+	}
+
+	if (!frameActive)
 		return;
 
 	auto& frame = frames[writeFrame];
@@ -147,6 +184,24 @@ void Profiler::EndFrame()
 	context->End(frames[writeFrame].disjoint.get());
 	writeFrame = (writeFrame + 1) % kFrameLatency;
 	framesSinceInit++;
+}
+
+void Profiler::SetActive(bool a_active)
+{
+	if (keepActiveFrames > 0) {
+		keepActiveFrames--;
+		a_active = true;
+	}
+	if (a_active && !active) {
+		// The ring still holds the queries of the last timed frames: start it over, so a frame
+		// timed before the pause is never read as the latest one.
+		for (auto& frame : frames) {
+			frame.activeCount = 0;
+			frame.inFlight = false;
+		}
+		framesSinceInit = 0;
+	}
+	active = a_active;
 }
 
 void Profiler::CollectResults()
@@ -227,11 +282,9 @@ void Profiler::CollectResults()
 			result.cpuTimeMs = known.cpu.lastMs;
 		}
 		result.avgMs = known.gpu.GetAverage();
-		result.p95Ms = known.gpu.GetPercentile(95.0f);
-		result.p99Ms = known.gpu.GetPercentile(99.0f);
+		known.gpu.GetPercentiles(95.0f, 99.0f, result.p95Ms, result.p99Ms);
 		result.cpuAvgMs = known.cpu.GetAverage();
-		result.cpuP95Ms = known.cpu.GetPercentile(95.0f);
-		result.cpuP99Ms = known.cpu.GetPercentile(99.0f);
+		known.cpu.GetPercentiles(95.0f, 99.0f, result.cpuP95Ms, result.cpuP99Ms);
 		result.valid = true;
 		result.historyBuffer = known.gpu.history;
 		result.historyHead = known.gpu.head;
