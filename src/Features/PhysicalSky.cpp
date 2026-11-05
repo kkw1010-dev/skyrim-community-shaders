@@ -1603,7 +1603,7 @@ void PhysicalSky::AccumShadow()
 			globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV,
 			volumetricShadows.shadowView,
 			static_cast<ID3D11ShaderResourceView*>(nullptr),
-			terrainShadows.IsHeightMapReady() ? terrainShadows.texShadowHeight->srv.get() : nullptr,
+			terrainShadows.IsHeightMapReady() && terrainShadows.texShadowHeight ? terrainShadows.texShadowHeight->srv.get() : nullptr,
 			cloudShadows.loaded ? cloudShadows.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1]->srv.get() : nullptr,
 			settings.enableVolumetricClouds && texShadowVolume ? texShadowVolume->srv.get() : nullptr,
 		};
