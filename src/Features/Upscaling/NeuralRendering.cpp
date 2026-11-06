@@ -67,9 +67,9 @@ namespace
 		const std::string frameGeneration = upscaling.UsesDLSSGFrameGen() ? std::format("DLSS-G {}x", upscaling.GetFrameGenerationMultiplier()) : std::string("off");
 		const bool hdr = globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.settings.enableHDR;
 		logger::info("[NeuralRendering] tester summary: CS {} | GPU {} | driver {} | NR runtime {} | placement {} | model {}x{} for a {}x{} frame | "
-					 "mix {:.2f}, style {}, intensity {:.2f}, local tone {:.2f}, local structure {:.2f}, skin {}, auto mask {} | frame generation {} | HDR {}",
+					 "mix {:.2f}, preset {}, style {}, intensity {:.2f}, local tone {:.2f}, local structure {:.2f}, skin {}, auto mask {} | frame generation {} | HDR {}",
 			Plugin::BUILD_DESCRIBE, globals::state->adapterDescription, DriverVersion(), a_runtime, a_placement, a_modelWidth, a_modelHeight, a_frameWidth,
-			a_frameHeight, a_mix, a_tuning.style, a_tuning.intensity, a_tuning.localToneStrength, a_tuning.localStructureStrength, skin,
+			a_frameHeight, a_mix, a_tuning.preset, a_tuning.style, a_tuning.intensity, a_tuning.localToneStrength, a_tuning.localStructureStrength, skin,
 			a_tuning.useAutoMask ? "on" : "off", frameGeneration, hdr ? "on" : "off");
 	}
 
@@ -87,7 +87,7 @@ namespace
 	{
 		if (state == NR::RuntimeAvailability::State::kMissing)
 			return T(TKEY("runtime_missing_fix"), "Install nvngx_dlssnr.dll under Data\\Shaders\\Upscaling\\Streamline\\.");
-		return T(TKEY("runtime_build_fix"), "Replace it with a validated 310.8 build of that file.");
+		return T(TKEY("runtime_build_fix"), "Replace it with a validated 310.8 or 310.9 build of that file.");
 	}
 
 	// Stage 1 of the 05-29 port leaves out the tracked-actor crop: its bound and line-of-sight
@@ -2102,7 +2102,7 @@ void NeuralRendering::DrawSettings(bool& enabled, uint32_t& placement, float& mi
 			Util::Text::Disabled("%s", RuntimeFixHint(availability.state));
 	}
 	ImGui::TextWrapped("%s", T(TKEY("description"),
-								 "Runs NVIDIA's neural rendering model on the scene, before upscaling or on the final image. Requires an NR-capable NVIDIA GPU and a validated 310.8 runtime build."));
+								 "Runs NVIDIA's neural rendering model on the scene, before upscaling or on the final image. Requires an NR-capable NVIDIA GPU and a validated 310.8 or 310.9 runtime build."));
 	int placementItem = static_cast<int>(std::min(placement, kMaxPlacement));
 	const std::array<const char*, kMaxPlacement + 1> placementLabels{
 		T(TKEY("placement_before"), "Before upscaling"),
@@ -2127,6 +2127,23 @@ void NeuralRendering::DrawSettings(bool& enabled, uint32_t& placement, float& mi
 			"How much of Neural Rendering's edit is shown: 0% leaves the frame as it was, 100% shows all of it.\n"
 			"Above 100% strengthens the effect by extrapolating the edit; too much exaggerates colour and hair.\n"
 			"It changes what is shown, not the GPU time."));
+	int presetItem = static_cast<int>(std::clamp(tuning.preset, NR::Tuning::kPresetFull, NR::Tuning::kPresetSmall) - NR::Tuning::kPresetFull);
+	const std::array<const char*, 2> presetLabels{
+		T(TKEY("preset_full"), "Full model (preset 1)"),
+		T(TKEY("preset_small"), "Small, faster model (preset 2, runtime 310.9)"),
+	};
+	bool presetChanged = ImGui::Combo(T(TKEY("model_preset"), "Model"), &presetItem, presetLabels.data(), static_cast<int>(presetLabels.size()));
+	if (presetChanged)
+		tuning.preset = static_cast<uint32_t>(presetItem) + NR::Tuning::kPresetFull;
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted(T(TKEY("model_preset_tooltip"),
+			"Which neural network the runtime runs. The full model is the one runtime 310.8 ships and 310.9 keeps.
+"
+			"Runtime 310.9 adds a smaller model that costs less GPU time and looks somewhat different.
+"
+			"Runtime 310.8 has only the full model and uses it for either choice."));
+	if (tuning.preset == NR::Tuning::kPresetSmall && availability.version.starts_with("310.8"))
+		Util::Text::Disabled("%s", T(TKEY("model_preset_small_unavailable"), "This runtime (310.8) has only the full model; it runs that one."));
 	int style = static_cast<int>(std::min(tuning.style, NR::Tuning::kMaxStyle));
 	const std::array<const char*, NR::Tuning::kMaxStyle + 1> styleLabels{
 		T(TKEY("style_0"), "Style 0"),
@@ -2134,7 +2151,8 @@ void NeuralRendering::DrawSettings(bool& enabled, uint32_t& placement, float& mi
 		T(TKEY("style_2"), "Style 2"),
 	};
 	bool changed = ImGui::Combo(T(TKEY("style"), "Style"), &style, styleLabels.data(), static_cast<int>(styleLabels.size()));
-	bool recreateTuning = changed;
+	bool recreateTuning = changed || presetChanged;
+	changed |= presetChanged;
 	if (changed)
 		tuning.style = static_cast<uint32_t>(style);
 	changed |= ImGui::SliderFloat(T(TKEY("intensity"), "Intensity"), &tuning.intensity, NR::Tuning::kMinStrength, NR::Tuning::kMaxStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);

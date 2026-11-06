@@ -27,8 +27,21 @@ namespace NR
 
 	/** @brief Major version of the nvngx_dlssnr.dll builds this pass accepts. */
 	inline constexpr uint32_t kRequiredRuntimeMajor = 310;
-	/** @brief Minor version of the nvngx_dlssnr.dll builds this pass accepts. */
-	inline constexpr uint32_t kRequiredRuntimeMinor = 8;
+	/**
+	 * @brief Minor versions of the nvngx_dlssnr.dll builds this pass accepts. 310.9 keeps 310.8's exports,
+	 *        keys and parameter slots (nr-port/RUNTIME-310.9.16.md) and adds a second model picked by preset.
+	 */
+	inline constexpr std::array<uint32_t, 2> kAcceptedRuntimeMinors{ 8, 9 };
+
+	/** @brief True when a runtime minor version is one this pass accepts. */
+	inline constexpr bool IsAcceptedRuntimeMinor(uint32_t minor)
+	{
+		for (const auto accepted : kAcceptedRuntimeMinors) {
+			if (accepted == minor)
+				return true;
+		}
+		return false;
+	}
 	/** @brief Name of the runtime file, resolved inside Streamline's plugin directory. */
 	inline constexpr const char* kRuntimeFileName = "nvngx_dlssnr.dll";
 	/** @brief Leading digest characters echoed back when a runtime build is refused. */
@@ -43,22 +56,32 @@ namespace NR
 		~TerminationSentinel() { processTerminating.store(true, std::memory_order_relaxed); }
 	};
 
-	/** @brief Reason a runtime version cannot be used, or empty when it is the accepted 310.8.x. */
+	/** @brief The accepted versions as text for messages, e.g. "310.8 or 310.9". */
+	inline std::string AcceptedRuntimeVersions()
+	{
+		std::string text;
+		for (size_t i = 0; i < kAcceptedRuntimeMinors.size(); ++i)
+			text += std::format("{}{}.{}", i == 0 ? "" : i + 1 == kAcceptedRuntimeMinors.size() ? " or " : ", ", kRequiredRuntimeMajor, kAcceptedRuntimeMinors[i]);
+		return text;
+	}
+
+	/** @brief Reason a runtime version cannot be used, or empty when it is an accepted 310.8.x / 310.9.x. */
 	template <class V>
 	std::string UnsupportedRuntimeReason(const std::optional<V>& version, std::string_view directory)
 	{
 		if (!version)
 			return std::format("nvngx_dlssnr.dll in {} has no version information", directory);
-		if (version->major() != kRequiredRuntimeMajor || version->minor() != kRequiredRuntimeMinor)
-			return std::format("unsupported runtime version {} (needs {}.{})", version->string("."), kRequiredRuntimeMajor, kRequiredRuntimeMinor);
+		if (version->major() != kRequiredRuntimeMajor || !IsAcceptedRuntimeMinor(version->minor()))
+			return std::format("unsupported runtime version {} (needs {})", version->string("."), AcceptedRuntimeVersions());
 		return {};
 	}
 
-	// SHA-256 of the nvngx_dlssnr.dll builds (310.8 DVS Production, 310.8.0.0 test) whose channel
-	// order was verified in game. A build outside this list is refused, not rendered on trust.
-	inline constexpr std::array<std::string_view, 2> kValidatedRuntimeSha256{
+	// SHA-256 of the nvngx_dlssnr.dll builds (310.8 DVS Production, 310.8.0.0 test, 310.9.16.0) whose
+	// channel order was verified in game. A build outside this list is refused, not rendered on trust.
+	inline constexpr std::array<std::string_view, 3> kValidatedRuntimeSha256{
 		"8270B350CD82DE5CE89806872CDD6B6A9249B80836B91BBEB3573470744CC206",
 		"E16BCF15E16E13F527491CDF7845B2FE6521A738D8F7C9C721866A8496E1FC8E",
+		"2BC19BC09A7B89DD44F73E2AC0108FCC586E2154BDD0830F242F4F040E28789F",
 	};
 
 	/** @brief True when a SHA-256 hex digest names a validated build; hex case is ignored. */
@@ -76,10 +99,10 @@ namespace NR
 	{
 		enum class State : uint8_t
 		{
-			kReady,               ///< The validated 310.8.x runtime is on disk.
+			kReady,               ///< A validated 310.8.x / 310.9.x runtime is on disk.
 			kMissing,             ///< No runtime file in the plugin directory.
-			kUnsupportedVersion,  ///< Present, but not a 310.8.x build.
-			kUnvalidatedBuild     ///< Present and 310.8.x, but not one of the pinned SHA-256 builds.
+			kUnsupportedVersion,  ///< Present, but not a 310.8.x / 310.9.x build.
+			kUnvalidatedBuild     ///< Present and an accepted version, but not one of the pinned SHA-256 builds.
 		};
 
 		State state = State::kMissing;
@@ -121,9 +144,9 @@ namespace NR
 			return { RuntimeAvailability::State::kUnsupportedVersion, version ? version->string(".") : std::string{}, rejected };
 		if (!IsValidatedRuntimeHash(digest)) {
 			return { RuntimeAvailability::State::kUnvalidatedBuild, version->string("."),
-				std::format("unsupported runtime build (SHA-256 {}...); Neural Rendering is validated with specific {}.{} builds",
+				std::format("unsupported runtime build (SHA-256 {}...); Neural Rendering is validated with specific {} builds",
 					digest.empty() ? std::string_view{ "unavailable" } : digest.substr(0, kRuntimeDigestPrefix),
-					kRequiredRuntimeMajor, kRequiredRuntimeMinor) };
+					AcceptedRuntimeVersions()) };
 		}
 		return { RuntimeAvailability::State::kReady, version->string("."), {} };
 	}

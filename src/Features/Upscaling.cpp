@@ -25,7 +25,7 @@ namespace NR
 {
 	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Tuning, intensity, localToneStrength, localStructureStrength, skinStructureStrength,
 		skinToneStrength, hairToneStrength, eyeToneStrength, foliageToneStrength, landscapeToneStrength,
-		style, useAutoMask, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
+		preset, style, useAutoMask, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
 		materialStrength, strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape,
 		strengthOther, strengthEdgeSoftness, showMaterialMap, materialMapMode, materialMapFilter, toneTransfer, finalScale);
 }

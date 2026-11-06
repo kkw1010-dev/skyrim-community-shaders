@@ -19,11 +19,17 @@ namespace NR
 		/** @brief The share of NR's edit: above 1 extrapolates it (orig + mix * (NR - orig)). */
 		static constexpr float kMaxMix = 2.0f;
 		static constexpr uint32_t kMaxStyle = 2;
+		/**
+		 * @brief DLSSNR.Hint.Render.Preset: 1 is the full model (310.8 and 310.9), 2 the small, faster model
+		 *        310.9 adds. Unset, 310.9 falls back to preset 2; 310.8 answers 2 with its only model, preset 1.
+		 */
+		static constexpr uint32_t kPresetFull = 1, kPresetSmall = 2, kDefaultPreset = kPresetFull;
 		static constexpr uint32_t kRegionFitPadded = 0, kRegionFitTight = 1, kMaxRegionFit = kRegionFitTight;
 		/** @brief How the before-upscaling pass carries the scene to NR and back (ColorTransferCS ToneTransfer). */
 		static constexpr uint32_t kToneTransferGain = 0, kToneTransferAces = 1, kMaxToneTransfer = kToneTransferAces;
 		/** @brief Bounds of finalScale: below half the output the edit loses too much of its structure. */
 		static constexpr float kMinFinalScale = 0.5f, kMaxFinalScale = 1.0f;
+		uint32_t preset = kDefaultPreset;  // the user's choice (11-06): today's model by default, the small one opt-in
 		uint32_t style = 0;
 		float intensity = kDefaultStrength;
 		float localToneStrength = kDefaultStrength;
@@ -146,6 +152,7 @@ namespace NR
 		/** @brief Bounds user input to the reference runtime's tuning range and to the crop's dependencies. */
 		void Sanitize()
 		{
+			preset = std::clamp(preset, kPresetFull, kPresetSmall);
 			style = std::min(style, kMaxStyle);
 			toneTransfer = std::min(toneTransfer, kMaxToneTransfer);
 			finalScale = std::isfinite(finalScale) ? std::clamp(finalScale, kMinFinalScale, kMaxFinalScale) : kMaxFinalScale;

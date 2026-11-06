@@ -206,7 +206,7 @@ namespace NR
 		 */
 		void LogParameterReadBack(NVSDK_NGX_Parameter* parameters, uint32_t eyeIndex, const Tuning& tuning)
 		{
-			static constexpr const char* keys[] = { "DLSSNR.Style", "DLSSNR.Intensity", "DLSSNR.LocalToneStrength",
+			static constexpr const char* keys[] = { "DLSSNR.Hint.Render.Preset", "DLSSNR.Style", "DLSSNR.Intensity", "DLSSNR.LocalToneStrength",
 				"DLSSNR.LocalStructureStrength", "DLSSNR.SkinStructureStrength", "DLSSNR.UseAutoMask", "DLSSNR.UICorrection",
 				"DLSSNR.Reset", "DLSSNR.Enabled", "DLSSNR.DepthInverted", "DLSSNR.MVecScaleX", "DLSSNR.MVecScaleY",
 				"DLSSNR.Width", "DLSSNR.Height", "DLSSNR.ColorSubrectWidth", "DLSSNR.DepthSubrectWidth", "DLSSNR.MVecSubrectWidth",
@@ -238,6 +238,7 @@ namespace NR
 				if (!Util::SehGuarded([&] { result = parameters->Get(key, &actual); }) || NVSDK_NGX_FAILED(result) || actual != expected)
 					mismatches += std::format(" {} (set {}, read {})", key, expected, NVSDK_NGX_SUCCEED(result) ? std::to_string(actual) : "nothing");
 			};
+			checkUInt("DLSSNR.Hint.Render.Preset", tuning.preset);
 			checkUInt("DLSSNR.Style", tuning.style);
 			checkFloat("DLSSNR.Intensity", tuning.intensity);
 			checkFloat("DLSSNR.LocalToneStrength", tuning.localToneStrength);
@@ -253,6 +254,8 @@ namespace NR
 		/** @brief Writes the appearance parameters Feature 18 needs at creation and evaluation. */
 		void WriteTuning(ParameterWriter& writer, const Tuning& tuning, const ProtectionResources& protection)
 		{
+			// Read once, in CreateFeature, so a change needs a new feature (the panel recreates it).
+			writer.SetUInt("DLSSNR.Hint.Render.Preset", tuning.preset);
 			writer.SetUInt("DLSSNR.Style", tuning.style);
 			writer.SetFloat("DLSSNR.Intensity", tuning.intensity);
 			writer.SetFloat("DLSSNR.LocalToneStrength", tuning.localToneStrength);
@@ -560,8 +563,9 @@ namespace NR
 			writer.SetUInt("NVSDK_NGX_Parameter_PerfQualityValue", static_cast<unsigned int>(NVSDK_NGX_PerfQuality_Value_Balanced));
 			writer.SetUInt("NVSDK_NGX_Parameter_CreationNodeMask", 1u);
 			writer.SetUInt("NVSDK_NGX_Parameter_VisibilityNodeMask", 1u);
+			// DLSSNR.Hint.Render.Preset goes in WriteTuning: 310.9 picks its model by it (nr-port/RUNTIME-310.9.16.md).
 			// Not set, measured as no-ops on 310.8 by other integrations (nr-port/NEXT.md item 1):
-			// Hint.Render.Preset (one weight set), Scale / ScalingRatio / Upscaling (a same-size
+			// Scale / ScalingRatio / Upscaling (a same-size
 			// transform), and the SDR / Hdr / AutoExposure / pre-exposure keys (read by no project).
 			const auto flags = static_cast<unsigned int>(
 				NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_DoSharpening | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure);
