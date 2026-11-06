@@ -2137,10 +2137,8 @@ void NeuralRendering::DrawSettings(bool& enabled, uint32_t& placement, float& mi
 		tuning.preset = static_cast<uint32_t>(presetItem) + NR::Tuning::kPresetFull;
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T(TKEY("model_preset_tooltip"),
-			"Which neural network the runtime runs. The full model is the one runtime 310.8 ships and 310.9 keeps.
-"
-			"Runtime 310.9 adds a smaller model that costs less GPU time and looks somewhat different.
-"
+			"Which neural network the runtime runs. The full model is the one runtime 310.8 ships and 310.9 keeps.\n"
+			"Runtime 310.9 adds a smaller model that costs less GPU time and looks somewhat different.\n"
 			"Runtime 310.8 has only the full model and uses it for either choice."));
 	if (tuning.preset == NR::Tuning::kPresetSmall && availability.version.starts_with("310.8"))
 		Util::Text::Disabled("%s", T(TKEY("model_preset_small_unavailable"), "This runtime (310.8) has only the full model; it runs that one."));
