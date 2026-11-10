@@ -62,13 +62,19 @@ struct PendingCapture
 {
 	RE::BSMultiStreamInstanceTriShape* shape = nullptr;
 	RE::BSShaderMaterial* material = nullptr;
-	RE::NiSourceTexture* diffuseTexture = nullptr;
+	// Held from stage time, so a texture released before the apply step is still alive when the bucket takes it.
+	RE::NiPointer<RE::NiSourceTexture> diffuseTexture;
 	std::vector<uint8_t> bytes;
 	uint32_t count = 0;
 	uint64_t descVal = 0;
 	RE::NiPoint3 origin;
 	RE::NiPoint3 localMin{ 0.0f, 0.0f, 0.0f };
 	RE::NiPoint3 localMax{ 0.0f, 0.0f, 0.0f };
+	// Read from the shape at stage time: the shape can be destroyed before the capture is applied, so the apply step uses the pointer only as a key.
+	uint32_t triCount = 0;
+	float wavePeriod = 1.0f;
+	RE::NiPoint3 boundCenter{};
+	float modelRadius = 128.0f;
 };
 
 // Offset of the indirect args block. Uses an offset of 12 so the instance count lands on byte 16, as required for the raw UAV to have 16 byte alignment.
@@ -333,7 +339,7 @@ private:
 	bool CreateBucketArgsBuffer(GrassBucket& b, ID3D11Device* device);
 
 	/** @brief Caches per-type parameters (wave period, bound, mesh cost) from a source shape. */
-	void CacheBucketTypeParams(GrassBucket& b, RE::BSMultiStreamInstanceTriShape* shape);
+	void CacheBucketTypeParams(GrassBucket& b, const PendingCapture& pc);
 
 	/** @brief Samples a grass diffuse to decide whether it uses the complex-grass layout. */
 	bool DetectComplexGrass(RE::NiSourceTexture* tex, ID3D11DeviceContext* ctx);

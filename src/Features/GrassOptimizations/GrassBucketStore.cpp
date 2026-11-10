@@ -86,6 +86,10 @@ void GrassBucketStore::RefreshComplexGrass(float threshold, ID3D11DeviceContext*
 void GrassBucketStore::StageRemoval(RE::BSMultiStreamInstanceTriShape* shape)
 {
 	std::scoped_lock lk(pendingMutex);
+	// A dying shape's staged work is dropped here (as in alandtse #815 / #822), so no slice is ever added for a shape
+	// already gone and its pointer cannot alias a new shape allocated at the same address.
+	std::erase_if(pendingCaptures, [shape](const PendingCapture& pc) { return pc.shape == shape; });
+	std::erase_if(pendingGroupRemoves, [shape](const PendingGroupRemoval& pr) { return pr.shape == shape; });
 	pendingRemoves.push_back(shape);
 }
 
@@ -422,18 +426,18 @@ void GrassBucketStore::ApplyCaptures(std::vector<PendingCapture>& captures)
 
 	for (auto& pc : captures) {
 		const uint32_t meshId = meshLibrary.ResolveMeshId(pc.shape);
-		const uint32_t triCount = meshId ? 0u : (uint32_t)pc.shape->GetTrishapeRuntimeData().triangleCount;
-		const BucketKey bk{ meshId, pc.material, meshId ? nullptr : pc.diffuseTexture, triCount, meshId ? 0u : pc.descVal };
+		const uint32_t triCount = meshId ? 0u : pc.triCount;
+		const BucketKey bk{ meshId, pc.material, meshId ? nullptr : pc.diffuseTexture.get(), triCount, meshId ? 0u : pc.descVal };
 		auto& b = buckets[bk];
 		b.meshId = meshId;
-		b.diffuseTexture = RE::NiPointer<RE::NiSourceTexture>(pc.diffuseTexture);
+		b.diffuseTexture = pc.diffuseTexture;
 
 		if (b.firstNewSlice == UINT32_MAX)
 			b.firstNewSlice = (uint32_t)b.slices.size();
 
 		if (!b.typeParamsValid) {
-			CacheBucketTypeParams(b, pc.shape);
-			b.isComplex = DetectComplexGrass(pc.diffuseTexture, ctx);
+			CacheBucketTypeParams(b, pc);
+			b.isComplex = DetectComplexGrass(pc.diffuseTexture.get(), ctx);
 		}
 		if (frameParams.enableMeshLOD)
 			meshLibrary.EnsureLODMeshes(meshId);
@@ -618,9 +622,13 @@ bool GrassBucketStore::StageCapture(RE::BSMultiStreamInstanceTriShape* shape, co
 	pc.shape = shape;
 	pc.material = material;
 	pc.descVal = descVal;
-	pc.diffuseTexture = tex;
+	pc.diffuseTexture = RE::NiPointer<RE::NiSourceTexture>(tex);
 	pc.count = count;
 	pc.origin = shape->world.translate;
+	pc.triCount = (uint32_t)shape->GetTrishapeRuntimeData().triangleCount;
+	pc.wavePeriod = static_cast<RE::BSGrassShaderProperty*>(shaderProperty.get())->wavePeriod;
+	pc.boundCenter = shape->GetModelData().modelBound.center;
+	pc.modelRadius = shape->GetModelData().modelBound.radius;
 	pc.bytes.resize((size_t)count * kGrassStride);
 	std::memcpy(pc.bytes.data(), src, pc.bytes.size());
 
@@ -651,19 +659,16 @@ bool GrassBucketStore::StageCapture(RE::BSMultiStreamInstanceTriShape* shape, co
 	return true;
 }
 
-void GrassBucketStore::CacheBucketTypeParams(GrassBucket& b, RE::BSMultiStreamInstanceTriShape* shape)
+void GrassBucketStore::CacheBucketTypeParams(GrassBucket& b, const PendingCapture& pc)
 {
-	if (b.typeParamsValid || !shape)
+	if (b.typeParamsValid)
 		return;
 
-	if (auto* prop = static_cast<RE::BSGrassShaderProperty*>(shape->GetGeometryRuntimeData().shaderProperty.get()))
-		b.wavePeriod = prop->wavePeriod;
+	b.wavePeriod = pc.wavePeriod;
+	b.boundCenter = pc.boundCenter;
+	b.modelRadius = pc.modelRadius;
 
-	const auto& bound = shape->GetModelData().modelBound;
-	b.boundCenter = bound.center;
-	b.modelRadius = bound.radius;
-
-	const float tris = (float)shape->GetTrishapeRuntimeData().triangleCount;
+	const float tris = (float)pc.triCount;
 	const float cost = std::max(1.0f, tris / 8.0f);
 	const float w = std::sqrt(cost);
 	b.distScale = 1.0f / w;
