@@ -56,13 +56,18 @@ void GrassBucketStore::ApplyPending(ID3D11Device* device, ID3D11DeviceContext* c
 {
 	std::vector<PendingCapture> caps;
 	std::vector<RE::BSMultiStreamInstanceTriShape*> rems;
+	std::vector<PendingGroupRemoval> groupRems;
 	{
 		std::scoped_lock lk(pendingMutex);
 		caps.swap(pendingCaptures);
 		rems.swap(pendingRemoves);
+		groupRems.swap(pendingGroupRemoves);
 	}
 
 	ApplyRemovals(rems);
+	// Before the captures: a plugin that clears grass removes a group and re-adds the kept part in one go, and the
+	// re-added records must not be the ones taken out.
+	ApplyGroupRemovals(groupRems);
 	ApplyCaptures(caps);
 	UploadDirtyBuckets(device, ctx);
 }
@@ -107,6 +112,214 @@ void GrassBucketStore::DiscardPending()
 	pendingCaptures.clear();
 	pendingCaptures.shrink_to_fit();
 	pendingRemoves.clear();
+	pendingGroupRemoves.clear();
+}
+
+namespace
+{
+	/** @brief One 32-byte half-packed grass instance record, compared and hashed as raw bytes. */
+	struct GrassRecord
+	{
+		uint64_t w[4];
+		bool operator==(const GrassRecord&) const = default;
+	};
+	static_assert(sizeof(GrassRecord) == kGrassStride);
+
+	struct GrassRecordHash
+	{
+		size_t operator()(const GrassRecord& r) const noexcept
+		{
+			uint64_t h = 0x9E3779B97F4A7C15ull;
+			for (uint64_t v : r.w) {
+				h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+				h *= 0xFF51AFD7ED558CCDull;
+			}
+			return (size_t)(h ^ (h >> 33));
+		}
+	};
+
+	/** @brief Origin-relative extent of half-packed records (position halves at bytes 0, 2, 4). */
+	void RecordBounds(const uint8_t* data, uint32_t count, RE::NiPoint3& lmn, RE::NiPoint3& lmx)
+	{
+		using DirectX::PackedVector::XMConvertHalfToFloat;
+		lmn = { FLT_MAX, FLT_MAX, FLT_MAX };
+		lmx = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+		for (uint32_t i = 0; i < count; ++i) {
+			const uint8_t* cord = data + (size_t)i * kGrassStride;
+			const float lx = XMConvertHalfToFloat(*reinterpret_cast<const uint16_t*>(cord + 0));
+			const float ly = XMConvertHalfToFloat(*reinterpret_cast<const uint16_t*>(cord + 2));
+			const float lz = XMConvertHalfToFloat(*reinterpret_cast<const uint16_t*>(cord + 4));
+			lmn.x = std::min(lmn.x, lx);
+			lmn.y = std::min(lmn.y, ly);
+			lmn.z = std::min(lmn.z, lz);
+			lmx.x = std::max(lmx.x, lx);
+			lmx.y = std::max(lmx.y, ly);
+			lmx.z = std::max(lmx.z, lz);
+		}
+	}
+}
+
+void GrassBucketStore::StageGroupRemoval(RE::BSMultiStreamInstanceTriShape* shape, const void* src, uint32_t count)
+{
+	if (!shape || !count)
+		return;
+
+	{
+		// Only shapes this store draws matter; any other shape is still drawn by the engine from its own groups.
+		std::shared_lock lk(shapeBucketMutex);
+		if (!shapeBucketId.contains(shape))
+			return;
+	}
+
+	if (!src) {
+		// No CPU-side copy of the group, so its records can't be told apart: they keep being drawn until the cell unloads.
+		std::scoped_lock lk(pendingMutex);
+		if (groupRemovalLogs < 20) {
+			++groupRemovalLogs;
+			logger::info("[GRASS OPTIMIZATIONS] a grass group of {} instance(s) was removed at run time but has no CPU copy; it stays drawn until its cell unloads", count);
+		}
+		return;
+	}
+
+	PendingGroupRemoval pr;
+	pr.shape = shape;
+	pr.count = count;
+	pr.bytes.resize((size_t)count * kGrassStride);
+	std::memcpy(pr.bytes.data(), src, pr.bytes.size());
+
+	std::scoped_lock lk(pendingMutex);
+	pendingGroupRemoves.push_back(std::move(pr));
+}
+
+void GrassBucketStore::ApplyGroupRemovals(std::vector<PendingGroupRemoval>& removals)
+{
+	if (removals.empty())
+		return;
+
+	// One pass over a shape's slices for all of its removed groups, so a burst of removals costs O(records), not O(groups x records).
+	std::stable_sort(removals.begin(), removals.end(), [](const auto& a, const auto& b) { return a.shape < b.shape; });
+
+	static thread_local std::unordered_map<GrassRecord, uint32_t, GrassRecordHash> wanted;
+
+	for (size_t first = 0; first < removals.size();) {
+		RE::BSMultiStreamInstanceTriShape* shape = removals[first].shape;
+		size_t last = first;
+		uint32_t wantedCount = 0;
+		wanted.clear();
+		for (; last < removals.size() && removals[last].shape == shape; ++last) {
+			const auto& pr = removals[last];
+			for (uint32_t i = 0; i < pr.count; ++i) {
+				GrassRecord rec;
+				std::memcpy(&rec, pr.bytes.data() + (size_t)i * kGrassStride, kGrassStride);
+				++wanted[rec];
+			}
+			wantedCount += pr.count;
+		}
+		const size_t groups = last - first;
+		first = last;
+
+		GrassBucket* b = nullptr;
+		{
+			std::shared_lock lk(shapeBucketMutex);
+			if (auto it = shapeBucketId.find(shape); it != shapeBucketId.end())
+				b = it->second;
+		}
+
+		uint32_t found = 0;
+		if (b) {
+			uint32_t firstModified = UINT32_MAX;
+			for (uint32_t si = 0; si < (uint32_t)b->slices.size() && found < wantedCount; ++si) {
+				BucketSlice& s = b->slices[si];
+				if (s.shape != shape || !s.count)
+					continue;
+
+				uint8_t* data = s.data.data();
+				uint32_t write = 0;
+				for (uint32_t r = 0; r < s.count; ++r) {
+					GrassRecord rec;
+					std::memcpy(&rec, data + (size_t)r * kGrassStride, kGrassStride);
+					if (found < wantedCount) {
+						if (auto it = wanted.find(rec); it != wanted.end() && it->second) {
+							--it->second;
+							++found;
+							continue;
+						}
+					}
+					if (write != r)
+						std::memcpy(data + (size_t)write * kGrassStride, data + (size_t)r * kGrassStride, kGrassStride);
+					++write;
+				}
+
+				if (write == s.count)
+					continue;
+
+				b->totalInstances -= std::min(s.count - write, b->totalInstances);
+				s.count = write;
+				s.data.resize((size_t)write * kGrassStride);
+				if (write) {
+					RecordBounds(s.data.data(), write, s.localMin, s.localMax);
+					SliceBounds& sb = b->sliceBounds[si];
+					sb.lo[0] = s.origin.x + s.localMin.x;
+					sb.lo[1] = s.origin.y + s.localMin.y;
+					sb.lo[2] = s.origin.z + s.localMin.z;
+					sb.hi[0] = s.origin.x + s.localMax.x;
+					sb.hi[1] = s.origin.y + s.localMax.y;
+					sb.hi[2] = s.origin.z + s.localMax.z;
+				}
+				firstModified = std::min(firstModified, si);
+			}
+
+			if (firstModified != UINT32_MAX) {
+				// Drop the slices this emptied, keeping firstNewSlice on the same slice (see ApplyRemovals).
+				size_t write = firstModified;
+				uint32_t remappedFirstNew = UINT32_MAX;
+				for (size_t read = firstModified; read < b->slices.size(); ++read) {
+					if ((uint32_t)read == b->firstNewSlice)
+						remappedFirstNew = (uint32_t)write;
+					if (!b->slices[read].count)
+						continue;
+					if (write != read) {
+						b->slices[write] = std::move(b->slices[read]);
+						b->sliceBounds[write] = b->sliceBounds[read];
+					}
+					++write;
+				}
+				b->slices.resize(write);
+				b->sliceBounds.resize(write);
+				if (b->firstNewSlice != UINT32_MAX && b->firstNewSlice >= firstModified)
+					b->firstNewSlice = (remappedFirstNew != UINT32_MAX) ? remappedFirstNew : (uint32_t)write;
+
+				if (b->slices.empty()) {
+					std::unique_lock lk(shapeBucketMutex);
+					std::erase_if(shapeBucketId, [dying = b](const auto& entry) { return entry.second == dying; });
+					for (auto it = buckets.begin(); it != buckets.end(); ++it) {
+						if (&it->second == b) {
+							buckets.erase(it);
+							break;
+						}
+					}
+				} else {
+					// A CPU rebuild from the first changed slice. It also covers any compaction staged this frame,
+					// whose GPU copy would use the slices' new counts with their old data.
+					b->needsCompact = false;
+					b->dirty = true;
+					b->rebuildFromSlice = (b->rebuildFromSlice == UINT32_MAX) ? firstModified : std::min(b->rebuildFromSlice, firstModified);
+					b->clustersValid = false;
+					b->coarseValid = false;
+				}
+			}
+		}
+
+		if (found < wantedCount || groupRemovalLogs < 10) {
+			if (groupRemovalLogs < 30) {
+				++groupRemovalLogs;
+				logger::info("[GRASS OPTIMIZATIONS] run-time grass removal: {} group(s), {} of {} instance(s) taken out of the optimized draw{}",
+					groups, found, wantedCount, found < wantedCount ? " (the rest were not in the captured copy and may still show)" : "");
+			}
+		} else {
+			logger::debug("[GRASS OPTIMIZATIONS] run-time grass removal: {} group(s), {} instance(s)", groups, found);
+		}
+	}
 }
 
 void GrassBucketStore::ApplyRemovals(const std::vector<RE::BSMultiStreamInstanceTriShape*>& removes)

@@ -49,6 +49,14 @@ struct SliceBounds
 };
 static_assert(sizeof(SliceBounds) == 32);
 
+/** @brief The records of one instance group the engine removed from a still-living shape (RemoveGroup), applied on the next grass frame. */
+struct PendingGroupRemoval
+{
+	RE::BSMultiStreamInstanceTriShape* shape = nullptr;
+	std::vector<uint8_t> bytes;  // the group's 32-byte records, copied from its CPU-side vertex data
+	uint32_t count = 0;
+};
+
 /** @brief A capture queued by the cell-load hooks, applied to a bucket on the next grass frame. */
 struct PendingCapture
 {
@@ -264,6 +272,11 @@ public:
 	/** @brief Stages a dead shape for removal on the next grass frame. */
 	void StageRemoval(RE::BSMultiStreamInstanceTriShape* shape);
 
+	/** @brief Stages the records of one instance group that the engine is removing from a living shape
+	    (BSMultiStreamInstanceTriShape::RemoveGroup, used by plugins that clear grass at run time), so the
+	    captured copies of those records stop being drawn. */
+	void StageGroupRemoval(RE::BSMultiStreamInstanceTriShape* shape, const void* src, uint32_t count);
+
 	/** @brief Marks a bucket's representative shape for this frame as having been queued for setup. Returns true when there is no instanced bucket or first of its bucket this frame. */
 	bool ClaimQueueSlot(RE::BSMultiStreamInstanceTriShape* shape, uint32_t frame);
 
@@ -287,6 +300,9 @@ public:
 private:
 	/** @brief Removes dead shapes' slices from their buckets and drops them from the lookup maps. */
 	void ApplyRemovals(const std::vector<RE::BSMultiStreamInstanceTriShape*>& removes);
+
+	/** @brief Takes the removed groups' records out of their shapes' slices (one pass per shape) and marks the buckets for re-upload. */
+	void ApplyGroupRemovals(std::vector<PendingGroupRemoval>& removals);
 
 	/** @brief Folds staged captures into buckets, creating buckets and slices as needed. */
 	void ApplyCaptures(std::vector<PendingCapture>& captures);
@@ -329,7 +345,9 @@ private:
 
 	std::vector<PendingCapture> pendingCaptures;
 	std::vector<RE::BSMultiStreamInstanceTriShape*> pendingRemoves;
+	std::vector<PendingGroupRemoval> pendingGroupRemoves;
 	std::mutex pendingMutex;
+	std::atomic<uint32_t> groupRemovalLogs{ 0 };  // caps the info lines about run-time group removals
 
 	// Read by culling jobs, so this guards the pointed-to buckets' lifetime as well as the map itself.
 	std::unordered_map<RE::BSMultiStreamInstanceTriShape*, GrassBucket*> shapeBucketId;

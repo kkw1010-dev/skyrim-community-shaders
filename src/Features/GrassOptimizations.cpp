@@ -789,6 +789,23 @@ void GrassOptimizations::Hooks::DoneAddingInstances::thunk(RE::BSMultiStreamInst
 	func(shape, a_instances);
 }
 
+void GrassOptimizations::Hooks::RemoveGroup::thunk(RE::BSMultiStreamInstanceTriShape* shape, std::uint32_t groupIndex)
+{
+	// Read the group before the engine frees it. Its CPU copy holds the same 32-byte records the capture hooks stored.
+	auto prop = shape ? shape->GetGeometryRuntimeData().shaderProperty : nullptr;
+	if (prop && prop->GetRTTI() == globals::rtti::BSGrassShaderPropertyRTTI.get()) {
+		auto& rt = shape->GetMultiStreamTrishapeRuntimeData();
+		if (groupIndex < rt.instanceGroups.size()) {
+			if (auto* group = rt.instanceGroups[groupIndex]; group && group->instanceCount) {
+				auto* vb = group->vertexBuffer;
+				const bool cpuCopy = vb && vb->m_data && vb->byteWidth >= (size_t)group->instanceCount * kGrassStride;
+				globals::features::grassOptimizations.bucketStore.StageGroupRemoval(shape, cpuCopy ? vb->m_data : nullptr, group->instanceCount);
+			}
+		}
+	}
+	func(shape, groupIndex);
+}
+
 void GrassOptimizations::Hooks::BSGrassShader_SetupGeometry::thunk(RE::BSShader* This, RE::BSRenderPass* a2, std::uint32_t flags)
 {
 	auto& self = globals::features::grassOptimizations;

@@ -217,6 +217,13 @@ public:
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/** @brief Takes a removed group's records out of the optimized draw; plugins that clear grass at run time remove groups from living shapes. */
+		struct RemoveGroup
+		{
+			static void thunk(RE::BSMultiStreamInstanceTriShape* shape, std::uint32_t groupIndex);
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		struct BSGrassShader_SetupGeometry
 		{
 			static void thunk(RE::BSShader* This, RE::BSRenderPass* a2, std::uint32_t flags);
@@ -278,6 +285,7 @@ public:
 			stl::write_vfunc<0x0, BSMultiStreamInstanceTriShape_dtor>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
 			stl::write_vfunc<0x34, BSMultiStreamInstanceTriShape_OnVisible>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
 			stl::write_vfunc<0x3A, DoneAddingInstances>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
+			stl::write_vfunc<0x3D, RemoveGroup>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
 
 			stl::write_vfunc<0x6, BSGrassShader_SetupGeometry>(RE::VTABLE_BSGrassShader[0]);
 
