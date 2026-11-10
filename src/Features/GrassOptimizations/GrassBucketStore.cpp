@@ -1,4 +1,5 @@
 #include "GrassBucketStore.h"
+#include <unordered_set>
 
 
 void GrassBucketStore::SetupResources()
@@ -67,7 +68,7 @@ void GrassBucketStore::ApplyPending(ID3D11Device* device, ID3D11DeviceContext* c
 	ApplyRemovals(rems);
 	// Before the captures: a plugin that clears grass removes a group and re-adds the kept part in one go, and the
 	// re-added records must not be the ones taken out.
-	ApplyGroupRemovals(groupRems);
+	ApplyGroupRemovals(groupRems, caps);
 	ApplyCaptures(caps);
 	UploadDirtyBuckets(device, ctx);
 }
@@ -195,10 +196,25 @@ void GrassBucketStore::StageGroupRemoval(RE::BSMultiStreamInstanceTriShape* shap
 	pendingGroupRemoves.push_back(std::move(pr));
 }
 
-void GrassBucketStore::ApplyGroupRemovals(std::vector<PendingGroupRemoval>& removals)
+void GrassBucketStore::ApplyGroupRemovals(std::vector<PendingGroupRemoval>& removals, const std::vector<PendingCapture>& captures)
 {
 	if (removals.empty())
 		return;
+
+	// A plugin that clears grass removes groups and re-adds the kept records in the same call, so the shape is
+	// re-captured in this batch; a cell unload never re-adds. The two are logged apart.
+	static thread_local std::unordered_set<RE::BSMultiStreamInstanceTriShape*> recaptured;
+	recaptured.clear();
+	for (const auto& pc : captures)
+		recaptured.insert(pc.shape);
+
+	struct BurstTotals
+	{
+		uint32_t shapes = 0;
+		size_t groups = 0;
+		uint32_t wanted = 0;
+		uint32_t found = 0;
+	} edit, unload;
 
 	// One pass over a shape's slices for all of its removed groups, so a burst of removals costs O(records), not O(groups x records).
 	std::stable_sort(removals.begin(), removals.end(), [](const auto& a, const auto& b) { return a.shape < b.shape; });
@@ -322,14 +338,33 @@ void GrassBucketStore::ApplyGroupRemovals(std::vector<PendingGroupRemoval>& remo
 			}
 		}
 
-		if (found < wantedCount || groupRemovalLogs < 10) {
-			if (groupRemovalLogs < 30) {
-				++groupRemovalLogs;
-				logger::info("[GRASS OPTIMIZATIONS] run-time grass removal: {} group(s), {} of {} instance(s) taken out of the optimized draw{}",
-					groups, found, wantedCount, found < wantedCount ? " (the rest were not in the captured copy and may still show)" : "");
-			}
+		BurstTotals& t = recaptured.contains(shape) ? edit : unload;
+		++t.shapes;
+		t.groups += groups;
+		t.wanted += wantedCount;
+		t.found += found;
+	}
+
+	constexpr const char* kMissNote = " (the rest were not in the captured copy and may still show)";
+	if (edit.shapes) {
+		uint32_t readded = 0;
+		for (const auto& pc : captures)
+			if (recaptured.contains(pc.shape))
+				readded += pc.count;
+		// Rare (a camp set-up or pack-up), so every one is logged up to a high cap: the orchestrator reads these after a run.
+		if (grassEditLogs < 500) {
+			++grassEditLogs;
+			logger::info("[GRASS OPTIMIZATIONS] grass edit by a plugin (groups removed and re-added in one frame, e.g. a Wayfarer's Rest camp): {} shape(s), {} group(s), {} of {} instance(s) taken out of the optimized draw, {} re-added{}",
+				edit.shapes, edit.groups, edit.found, edit.wanted, readded, edit.found < edit.wanted ? kMissNote : "");
+		}
+	}
+	if (unload.shapes) {
+		if ((unload.found < unload.wanted || groupRemovalLogs < 5) && groupRemovalLogs < 30) {
+			++groupRemovalLogs;
+			logger::info("[GRASS OPTIMIZATIONS] run-time grass removal (cell unload): {} shape(s), {} group(s), {} of {} instance(s) taken out of the optimized draw{}",
+				unload.shapes, unload.groups, unload.found, unload.wanted, unload.found < unload.wanted ? kMissNote : "");
 		} else {
-			logger::debug("[GRASS OPTIMIZATIONS] run-time grass removal: {} group(s), {} instance(s)", groups, found);
+			logger::debug("[GRASS OPTIMIZATIONS] run-time grass removal (cell unload): {} group(s), {} instance(s)", unload.groups, unload.found);
 		}
 	}
 }

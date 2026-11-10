@@ -307,8 +307,12 @@ private:
 	/** @brief Removes dead shapes' slices from their buckets and drops them from the lookup maps. */
 	void ApplyRemovals(const std::vector<RE::BSMultiStreamInstanceTriShape*>& removes);
 
-	/** @brief Takes the removed groups' records out of their shapes' slices (one pass per shape) and marks the buckets for re-upload. */
-	void ApplyGroupRemovals(std::vector<PendingGroupRemoval>& removals);
+	/**
+	 * @brief Takes the removed groups' records out of their shapes' slices (one pass per shape) and marks the buckets for re-upload.
+	 * @param captures This frame's captures. A shape that is also re-captured had grass cleared by a plugin (removed and re-added
+	 * in one go, as Wayfarer's Rest does); its removals are logged apart from cell unloads.
+	 */
+	void ApplyGroupRemovals(std::vector<PendingGroupRemoval>& removals, const std::vector<PendingCapture>& captures);
 
 	/** @brief Folds staged captures into buckets, creating buckets and slices as needed. */
 	void ApplyCaptures(std::vector<PendingCapture>& captures);
@@ -353,7 +357,8 @@ private:
 	std::vector<RE::BSMultiStreamInstanceTriShape*> pendingRemoves;
 	std::vector<PendingGroupRemoval> pendingGroupRemoves;
 	std::mutex pendingMutex;
-	std::atomic<uint32_t> groupRemovalLogs{ 0 };  // caps the info lines about run-time group removals
+	std::atomic<uint32_t> groupRemovalLogs{ 0 };  // caps the info lines about run-time group removals (cell unloads)
+	uint32_t grassEditLogs = 0;                   // caps the info lines about plugin grass edits (render thread only)
 
 	// Read by culling jobs, so this guards the pointed-to buckets' lifetime as well as the map itself.
 	std::unordered_map<RE::BSMultiStreamInstanceTriShape*, GrassBucket*> shapeBucketId;
