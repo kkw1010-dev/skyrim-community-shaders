@@ -204,10 +204,27 @@ void GrassBucketStore::ApplyGroupRemovals(std::vector<PendingGroupRemoval>& remo
 	for (size_t first = 0; first < removals.size();) {
 		RE::BSMultiStreamInstanceTriShape* shape = removals[first].shape;
 		size_t last = first;
+		while (last < removals.size() && removals[last].shape == shape)
+			++last;
+		const size_t groups = last - first;
+		const size_t runFirst = first;
+		first = last;
+
+		// The engine removes every group of a cell when the cell's grass unloads; when that empties the shape it is
+		// destroyed, and ApplyRemovals has already dropped it this frame. Nothing is left to match then.
+		GrassBucket* b = nullptr;
+		{
+			std::shared_lock lk(shapeBucketMutex);
+			if (auto it = shapeBucketId.find(shape); it != shapeBucketId.end())
+				b = it->second;
+		}
+		if (!b)
+			continue;
+
 		uint32_t wantedCount = 0;
 		wanted.clear();
-		for (; last < removals.size() && removals[last].shape == shape; ++last) {
-			const auto& pr = removals[last];
+		for (size_t k = runFirst; k < last; ++k) {
+			const auto& pr = removals[k];
 			for (uint32_t i = 0; i < pr.count; ++i) {
 				GrassRecord rec;
 				std::memcpy(&rec, pr.bytes.data() + (size_t)i * kGrassStride, kGrassStride);
@@ -215,18 +232,9 @@ void GrassBucketStore::ApplyGroupRemovals(std::vector<PendingGroupRemoval>& remo
 			}
 			wantedCount += pr.count;
 		}
-		const size_t groups = last - first;
-		first = last;
-
-		GrassBucket* b = nullptr;
-		{
-			std::shared_lock lk(shapeBucketMutex);
-			if (auto it = shapeBucketId.find(shape); it != shapeBucketId.end())
-				b = it->second;
-		}
 
 		uint32_t found = 0;
-		if (b) {
+		{
 			uint32_t firstModified = UINT32_MAX;
 			for (uint32_t si = 0; si < (uint32_t)b->slices.size() && found < wantedCount; ++si) {
 				BucketSlice& s = b->slices[si];
