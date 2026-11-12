@@ -194,6 +194,8 @@ public:
 
 	/** @brief Draws the ImGui settings UI for light limit fix configuration and debug visualization. */
 	virtual void DrawSettings() override;
+	/** @brief Draws the switch for the light attach gate (skips redundant per-frame light updates). */
+	void DrawLightAttachSettings();
 	/** @brief Draws the debug overlay warning when light visualization is enabled. */
 	virtual void DrawOverlay() override;
 	/** @brief Returns whether the debug overlay should be displayed. */
@@ -248,6 +250,9 @@ public:
 		bool EnableParticleLightsCulling = true;
 		bool EnableLightsVisualisation = false;
 		uint LightsVisualisationMode = 0;
+
+		// Light attach gate: skips the engine's per-frame attach walk for unchanged dynamic lights.
+		bool SkipRedundantLightAttach = true;
 	};
 
 	uint clusterSize[3] = { 16 };

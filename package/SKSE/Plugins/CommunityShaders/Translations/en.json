@@ -1365,6 +1365,8 @@
     "feature.light_limit_fix.lights_vis_mode": "Lights Visualisation Mode",
     "feature.light_limit_fix.lights_vis_mode_tooltip": " - Visualise the light limit. Red when the \"strict\" light limit is reached (portal-strict lights).\n - Visualise the number of strict lights.\n - Visualise the number of clustered lights.\n - Visualize the Shadow Mask.\n",
     "feature.light_limit_fix.name": "Light Limit Fix",
+    "feature.light_limit_fix.skip_redundant_light_attach": "Skip Redundant Light Updates",
+    "feature.light_limit_fix.skip_redundant_light_attach_tooltip": "The game re-checks every dynamic light's nearby geometry each frame, which costs milliseconds in scenes with hundreds of lights. With this on, a light that has not moved or changed is only re-checked every 60 frames.",
     "feature.light_limit_fix.statistics": "Statistics",
     "feature.linear_lighting.ambient_multiplier": "Ambient Multiplier",
     "feature.linear_lighting.apply_game_gamma": "Apply Game Gamma",
