@@ -346,6 +346,21 @@ namespace SIE
 		bool loadedFromDisk = false; /**< true when the shader blob was read from the disk cache rather than compiled */
 	};
 
+	namespace SShaderCache
+	{
+		/** @brief Frees a vertex shader made by CreateVertexShader: the object and its bytecode share one uint8_t[] block. */
+		struct VertexShaderDeleter
+		{
+			void operator()(RE::BSGraphics::VertexShader* shader) const noexcept
+			{
+				std::destroy_at(shader);
+				delete[] reinterpret_cast<uint8_t*>(shader);
+			}
+		};
+
+		using VertexShaderPtr = std::unique_ptr<RE::BSGraphics::VertexShader, VertexShaderDeleter>;
+	}
+
 	class UpdateListener;
 
 	class ShaderCache
@@ -868,12 +883,12 @@ namespace SIE
 
 		~ShaderCache();
 
-		template <typename ShaderType>
+		template <typename ShaderType, typename Deleter = std::default_delete<ShaderType>>
 		using ShaderMapArray = std::array<
-			ankerl::unordered_dense::map<uint32_t, std::unique_ptr<ShaderType>>,
+			ankerl::unordered_dense::map<uint32_t, std::unique_ptr<ShaderType, Deleter>>,
 			RE::BSShader::Type::Total>;
 
-		ShaderMapArray<RE::BSGraphics::VertexShader> vertexShaders;
+		ShaderMapArray<RE::BSGraphics::VertexShader, SShaderCache::VertexShaderDeleter> vertexShaders;
 		ShaderMapArray<RE::BSGraphics::PixelShader> pixelShaders;
 		ShaderMapArray<RE::BSGraphics::ComputeShader> computeShaders;
 

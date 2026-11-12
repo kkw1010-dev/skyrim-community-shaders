@@ -7,6 +7,7 @@
 #include <Buffer.h>
 #include <array>
 #include <atomic>
+#include <d3d11_1.h>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -487,7 +488,7 @@ public:
 private:
 	std::optional<TonemapOwner> tonemapOwner;
 	uint historyResetFrame = UINT_MAX;
-	std::shared_ptr<REX::W32::ID3DUserDefinedAnnotation> pPerf;
+	winrt::com_ptr<ID3DUserDefinedAnnotation> pPerf;
 	std::mutex statsMutex;
 
 	/** @brief One begun perf event, kept for DescribeRecentPerfEvents. */

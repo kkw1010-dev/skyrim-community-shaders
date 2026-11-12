@@ -1695,7 +1695,7 @@ namespace SIE
 			return shaderBlob;
 		}
 
-		std::unique_ptr<RE::BSGraphics::VertexShader> CreateVertexShader(ID3DBlob& shaderData,
+		VertexShaderPtr CreateVertexShader(ID3DBlob& shaderData,
 			const RE::BSShader& shader, uint32_t descriptor)
 		{
 			static const auto perTechniqueBuffersArray =
@@ -1711,7 +1711,7 @@ namespace SIE
 			auto shaderPtr = new (rawPtr) RE::BSGraphics::VertexShader;
 			memcpy(rawPtr + sizeof(RE::BSGraphics::VertexShader), shaderData.GetBufferPointer(),
 				shaderData.GetBufferSize());
-			std::unique_ptr<RE::BSGraphics::VertexShader> newShader{ shaderPtr };
+			VertexShaderPtr newShader{ shaderPtr };
 			newShader->byteCodeSize = (uint32_t)shaderData.GetBufferSize();
 			newShader->id = descriptor;
 			newShader->vertexDesc = 0;
