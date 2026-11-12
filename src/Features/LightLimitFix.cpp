@@ -2,6 +2,7 @@
 #include "Effects11.h"
 #include "InverseSquareLighting.h"
 #include "LightLimitFix/LightAttach.h"
+#include "LightLimitFix/LightShapeSearch.h"
 #include "LinearLighting.h"
 
 #include "I18n/I18n.h"
@@ -19,7 +20,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	EnableParticleLightsCulling,
 	EnableLightsVisualisation,
 	LightsVisualisationMode,
-	SkipRedundantLightAttach)
+	SkipRedundantLightAttach,
+	FastLightShapeSearch,
+	VerifyLightShapeSearch)
 
 static constexpr uint CLUSTER_MAX_LIGHTS = 128;
 
@@ -35,6 +38,33 @@ void LightLimitFix::DrawLightAttachSettings()
 	}
 }
 
+void LightLimitFix::DrawLightShapeSearchSettings()
+{
+	Util::DisableGuard disableUnsupported(!LightShapeSearch::IsSupported() || LightShapeSearch::HasTripped());
+	ImGui::Checkbox(T(TKEY("fast_light_shape_search"), "Fast Light Shape Search"), &settings.FastLightShapeSearch);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s",
+			T(TKEY("fast_light_shape_search_tooltip"),
+				"Every frame the game looks through each nearby light's whole list of shapes for every piece of the player and of every moving actor. "
+				"In rooms with many lights that takes a large part of the frame. With this on, the same answer is found beside the piece looked up just before. "
+				"Nothing is skipped and the game's lists are not changed."));
+	}
+	ImGui::Checkbox(T(TKEY("verify_light_shape_search"), "Verify Light Shape Search (slow)"), &settings.VerifyLightShapeSearch);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s",
+			T(TKEY("verify_light_shape_search_tooltip"),
+				"For testing. The game does all the work as usual and every answer of the fast search is compared with it. "
+				"The result is written to the log every half minute and any mismatch at once."));
+	}
+	if (LightShapeSearch::IsSupported()) {
+		const auto counters = LightShapeSearch::GetCounters();
+		ImGui::Text("%s", std::format("Light shape search: {} lookups, {:.1f} nodes a lookup, {} mismatches, {} stale{}", counters.lookups,
+							  counters.lookups ? static_cast<double>(counters.steps) / static_cast<double>(counters.lookups) : 0.0, counters.mismatches,
+							  counters.stale, LightShapeSearch::HasTripped() ? " (turned itself off)" : "")
+							  .c_str());
+	}
+}
+
 void LightLimitFix::DrawSettings()
 {
 	auto shaderCache = globals::shaderCache;
@@ -44,6 +74,7 @@ void LightLimitFix::DrawSettings()
 	ImGui::Spacing();
 
 	DrawLightAttachSettings();
+	DrawLightShapeSearchSettings();
 
 	ImGui::Spacing();
 
@@ -397,6 +428,7 @@ void LightLimitFix::PostPostLoad()
 	particleLightConfigs.Load();
 	Hooks::Install();
 	LightAttach::Install();
+	LightShapeSearch::Install();
 }
 
 void LightLimitFix::DataLoaded()

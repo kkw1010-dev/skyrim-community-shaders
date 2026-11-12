@@ -201,6 +201,8 @@ public:
 	virtual void DrawSettings() override;
 	/** @brief Draws the switch for the light attach gate (skips redundant per-frame light updates). */
 	void DrawLightAttachSettings();
+	/** @brief Draws the switches and the counters of the light shape search. */
+	void DrawLightShapeSearchSettings();
 	/** @brief Draws the debug overlay warning when light visualization is enabled. */
 	virtual void DrawOverlay() override;
 	/** @brief Returns whether the debug overlay should be displayed. */
@@ -258,6 +260,11 @@ public:
 
 		// Light attach gate: skips the engine's per-frame attach walk for unchanged dynamic lights.
 		bool SkipRedundantLightAttach = true;
+
+		// Light shape search: answers the engine's per-shape "already in this light's list" search without the walk.
+		// Off by default; verify mode only compares its answers with the engine's walk.
+		bool FastLightShapeSearch = false;
+		bool VerifyLightShapeSearch = false;
 	};
 
 	uint clusterSize[3] = { 16 };
