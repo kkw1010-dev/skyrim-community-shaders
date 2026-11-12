@@ -21,6 +21,36 @@ struct GrassCollisionActorCandidate
 	float sqDistance;
 };
 
+namespace
+{
+	/**
+	 * @brief Visits every collision object under a_object, like RE::BSVisit::TraverseScenegraphCollision.
+	 *
+	 * That helper takes its visitor as a std::function by value and copies it at every scene node. This walk runs for every
+	 * nearby actor on every frame, so the visitor is passed by reference instead.
+	 */
+	template <class Visitor>
+	RE::BSVisit::BSVisitControl VisitCollisionObjects(RE::NiAVObject* a_object, Visitor& a_visitor)
+	{
+		using Control = RE::BSVisit::BSVisitControl;
+		if (!a_object)
+			return Control::kContinue;
+
+		if (auto* collision = static_cast<RE::bhkNiCollisionObject*>(a_object->collisionObject.get())) {
+			if (a_visitor(collision) == Control::kStop)
+				return Control::kStop;
+		}
+
+		if (auto* node = a_object->AsNode()) {
+			for (auto& child : node->GetChildren()) {
+				if (VisitCollisionObjects(child.get(), a_visitor) == Control::kStop)
+					return Control::kStop;
+			}
+		}
+		return Control::kContinue;
+	}
+}
+
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	GrassCollision::Settings,
 	EnableGrassCollision,
@@ -86,7 +116,7 @@ void GrassCollision::QueueCollisions()
 
 			eastl::vector<float4> collisionShapes{};
 
-			RE::BSVisit::TraverseScenegraphCollision(root, [&](RE::bhkNiCollisionObject* a_object) -> RE::BSVisit::BSVisitControl {
+			auto addShape = [&](RE::bhkNiCollisionObject* a_object) -> RE::BSVisit::BSVisitControl {
 				RE::NiPoint3 centerPos;
 				float radius;
 				if (Util::GetShapeBound(a_object, centerPos, radius)) {
@@ -104,7 +134,8 @@ void GrassCollision::QueueCollisions()
 					collisionShapes.push_back(data);
 				}
 				return RE::BSVisit::BSVisitControl::kContinue;
-			});
+			};
+			VisitCollisionObjects(root, addShape);
 
 			std::sort(collisionShapes.begin(), collisionShapes.end(), [](const float4& a, const float4& b) {
 				return a.w > b.w;
