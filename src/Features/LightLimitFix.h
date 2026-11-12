@@ -262,8 +262,8 @@ public:
 		bool SkipRedundantLightAttach = true;
 
 		// Light shape search: answers the engine's per-shape "already in this light's list" search without the walk.
-		// Off by default; verify mode only compares its answers with the engine's walk.
-		bool FastLightShapeSearch = false;
+		// On by default; verify mode only compares its answers with the engine's walk.
+		bool FastLightShapeSearch = true;
 		bool VerifyLightShapeSearch = false;
 	};
 

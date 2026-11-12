@@ -418,6 +418,6 @@ namespace LightShapeSearch
 		stl::write_thunk_call<RefreshWalk>(refresh + kRefreshWalkCall);
 		stl::write_thunk_call<AddGeometry>(refreshWalk + kAddGeometryCall);
 		installed = true;
-		logger::info("[LLF] Installed light shape search (off until turned on in the Light Limit Fix settings; trampoline {} bytes left)", trampoline.free_size());
+		logger::info("[LLF] Installed light shape search (on by default, switch in the Light Limit Fix settings; trampoline {} bytes left)", trampoline.free_size());
 	}
 }

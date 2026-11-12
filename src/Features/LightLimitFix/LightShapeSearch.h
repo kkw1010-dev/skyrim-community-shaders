@@ -14,8 +14,8 @@
  * miss, a light under rebuild, or any doubt, the engine's own routine runs. Nothing is remembered from one refresh to
  * the next, and the engine's lists are never written.
  *
- * Off until turned on in the Light Limit Fix settings. In verify mode the search only compares its answers with a full
- * walk and the engine does all the work.
+ * On by default; the switch is in the Light Limit Fix settings and is read at the start of every refresh. In verify
+ * mode the search only compares its answers with a full walk and the engine does all the work.
  */
 namespace LightShapeSearch
 {
