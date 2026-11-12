@@ -85,7 +85,6 @@ void InteriorSun::EarlyPrepass()
 	if (!isInteriorWithSun && !arraysCleared) {
 		ClearArrays();
 		currentCell = nullptr;
-		currentPortalGraph = nullptr;
 	}
 }
 
