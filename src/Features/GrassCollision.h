@@ -122,7 +122,21 @@ public:
 		static void Install()
 		{
 			stl::write_vfunc<0x6, BSGrassShader_SetupGeometry>(RE::VTABLE_BSGrassShader[0]);
-			stl::write_thunk_call<MainUpdate_QueueCollisions>(REL::RelocationID(35565, 36564).address() + Util::VersionedRelocation::Select(0x748, 0xC26, 0xC38));
+
+			const auto mainUpdate = REL::RelocationID(35565, 36564).address();
+			if (REL::Module::IsAE() && !REL::Module::IsAtLeast(SKSE::RUNTIME_SSE_1_6_1130)) {
+				// AE before 1.6.1130 has the wrapped call 5 bytes earlier than 1.6.1130 and later (read from 1.6.640 and
+				// 1.6.1170). Only 1.6.640 was read, so the place is confirmed first: a build that differs is left alone.
+				const auto callSite = mainUpdate + 0xC21;
+				if (!Util::VersionedRelocation::IsCallHookedByPlugin(callSite) &&
+					!Util::VersionedRelocation::IsCallTo(callSite, REL::ID(21873).address())) {
+					logger::warn("[GRASS COLLISION] Main update hook not applied: unexpected code at the collision queue call (unverified runtime)");
+					return;
+				}
+				stl::write_thunk_call<MainUpdate_QueueCollisions>(callSite);
+			} else {
+				stl::write_thunk_call<MainUpdate_QueueCollisions>(mainUpdate + Util::VersionedRelocation::Select(0x748, 0xC26, 0xC38));
+			}
 			logger::info("[GRASS COLLISION] Installed hooks");
 		}
 	};
