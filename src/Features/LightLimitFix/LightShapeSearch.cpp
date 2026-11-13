@@ -16,7 +16,8 @@ namespace LightShapeSearch
 		using LightShapeSearchLogic::Memo;
 		using LightShapeSearchLogic::Node;
 
-		// Skyrim 1.6.1170 only. Every id, offset and field offset below is confirmed at install by the byte patterns.
+		// Skyrim 1.6.640 and 1.6.1170 only: both have the same ids, offsets and bytes at these places. Every id, offset and
+		// field offset below is confirmed at install by the byte patterns.
 		constexpr std::uint64_t kRefreshId = 106350;       // refreshes the lights of one object: collects and sorts the lights in reach
 		constexpr std::uint64_t kRefreshWalkId = 106353;   // walks the object's shapes; per shape: begin, every light, finish
 		constexpr std::uint64_t kAddGeometryId = 108283;   // BSLight: searches the light's shape list, adds the shape when missing
@@ -370,8 +371,9 @@ namespace LightShapeSearch
 
 	void Install()
 	{
-		if (!REL::Module::IsAE() || REL::Module::get().version() != SKSE::RUNTIME_SSE_1_6_1170) {
-			logger::info("[LLF] Light shape search not applied: it is only verified on Skyrim 1.6.1170");
+		const auto version = REL::Module::get().version();
+		if (!REL::Module::IsAE() || (version != SKSE::RUNTIME_SSE_1_6_640 && version != SKSE::RUNTIME_SSE_1_6_1170)) {
+			logger::info("[LLF] Light shape search not applied: it is only verified on Skyrim 1.6.640 and 1.6.1170");
 			return;
 		}
 

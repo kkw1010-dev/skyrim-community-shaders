@@ -35,7 +35,7 @@ namespace LightShapeSearch
 		std::uint64_t blocked = 0;      // calls left to the engine for a light that missed or was fenced in this refresh
 	};
 
-	/** @brief True once both call sites are replaced, which needs Skyrim 1.6.1170 with the engine's own code at every checked place. */
+	/** @brief True once both call sites are replaced, which needs Skyrim 1.6.640 or 1.6.1170 with the engine's own code at every checked place. */
 	[[nodiscard]] bool IsSupported();
 
 	/** @brief True after the search turned itself off because a remembered node went stale or the validity call could not be read. */
